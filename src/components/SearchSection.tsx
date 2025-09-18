@@ -95,8 +95,29 @@ const SearchSection: React.FC<SearchSectionProps> = ({ onSearchStart, onSearchCo
               <span className="font-medium">{t('uploadImage')}</span>
             </button>
           </div>
-
-          <p className="text-xs text-white/50 text-center leading-relaxed">
+<div style={{ textAlign: "center", marginTop: "20px" }}>
+  <p style={{ fontWeight: "bold", marginBottom: "10px" }}>
+    🚀 إطلاق تجريبي  
+    <br />
+    إذا ودك نبحث لك عن المنتج، أرسل لنا صورة ونرد عليك بأسرع وقت إن شاء الله
+  </p>
+  <a
+    href="https://wa.me/96560089181"
+    target="_blank"
+    rel="noopener noreferrer"
+    style={{
+      display: "inline-block",
+      padding: "12px 20px",
+      borderRadius: "8px",
+      backgroundColor: "#25D366",
+      color: "#fff",
+      fontWeight: "bold",
+      textDecoration: "none",
+    }}
+  >
+    📷 أرسل صورة على واتساب
+  </a>
+</div>          <p className="text-xs text-white/50 text-center leading-relaxed">
             {t('supportedFormats')}
           </p>
         </div>
