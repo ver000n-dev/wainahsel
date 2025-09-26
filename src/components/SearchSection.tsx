@@ -16,12 +16,13 @@ const SearchSection: React.FC<SearchSectionProps> = ({ onSearchStart, onSearchCo
   const [isLoading, setIsLoading] = React.useState(false);
   const [searchResults, setSearchResults] = React.useState<any>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = React.useState<string | null>(null);
 
-  // ✅ خدمة التحليل (تشوفها تحت في services/aiSearch.ts)
-  const aiSearchService = React.useMemo(() => AIVisualSearchService.getInstance(), []);
-
-  // 🔐 تأكد من وجود المفتاح قبل البدء
-  const visionKey = import.meta.env.VITE_VISION_API_KEY as string | undefined;
+  // خدمة التحليل
+  const aiSearchService = React.useMemo(
+    () => AIVisualSearchService.getInstance(),
+    []
+  );
 
   const start = () => {
     setIsLoading(true);
@@ -37,12 +38,11 @@ const SearchSection: React.FC<SearchSectionProps> = ({ onSearchStart, onSearchCo
   const handleImageSearch = async (file: File) => {
     start();
     try {
-      if (!visionKey) {
-        // المفتاح غير موجود – لا نكسر الصفحة
-        setError('مفتاح خدمة الرؤية مفقود. تأكد من ضبط VITE_VISION_API_KEY في Vercel ثم أعد النشر.');
-        return;
-      }
-      // استدعاء الخدمة
+      // معاينة الصورة في واجهة النتائج
+      const url = URL.createObjectURL(file);
+      setPreviewUrl(url);
+
+      // استدعاء خدمة الرؤية عبر مسار /api/vision (السيرفر يقرأ VISION_API_KEY)
       const results = await aiSearchService.analyzeImage(file);
       setSearchResults(results);
     } catch (err) {
@@ -57,7 +57,7 @@ const SearchSection: React.FC<SearchSectionProps> = ({ onSearchStart, onSearchCo
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'image/*';
-    if (opts?.capture) (input as any).capture = opts.capture;
+    if (opts?.capture) input.setAttribute('capture', opts.capture);
     input.onchange = (e) => {
       const file = (e.target as HTMLInputElement).files?.[0];
       if (file) handleImageSearch(file);
@@ -65,9 +65,20 @@ const SearchSection: React.FC<SearchSectionProps> = ({ onSearchStart, onSearchCo
     input.click();
   };
 
+  const handleCloseResults = () => {
+    setSearchResults(null);
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+      setPreviewUrl(null);
+    }
+  };
+
   return (
     <div className="space-y-8">
-      <div className={`grid lg:grid-cols-2 gap-8 max-w-6xl mx-auto ${isRTL ? 'font-arabic' : ''}`} dir={isRTL ? 'rtl' : 'ltr'}>
+      <div
+        className={`grid lg:grid-cols-2 gap-8 max-w-6xl mx-auto ${isRTL ? 'font-arabic' : ''}`}
+        dir={isRTL ? 'rtl' : 'ltr'}
+      >
         {/* Find Products Card */}
         <div className="bg-white/5 backdrop-blur-sm border border-white/10 rounded-3xl p-8 space-y-6">
           <div className="text-center space-y-4">
@@ -100,25 +111,25 @@ const SearchSection: React.FC<SearchSectionProps> = ({ onSearchStart, onSearchCo
             </button>
           </div>
 
-          {/* وواتساب التجريبي يبقى كما هو */}
-          <div style={{ textAlign: "center", marginTop: "20px" }}>
-            <p style={{ fontWeight: "bold", marginBottom: "10px" }}>
+          {/* واتساب التجريبي */}
+          <div style={{ textAlign: 'center', marginTop: '20px' }}>
+            <p style={{ fontWeight: 'bold', marginBottom: '10px' }}>
               🚀 إطلاق تجريبي
               <br />
               إذا ودك نبحث لك عن المنتج، أرسل لنا صورة ونرد عليك بأسرع وقت إن شاء الله
             </p>
             <a
-              href="https://nam10.safelinks.protection.outlook.com/?url=https%3A%2F%2Fwa.me%2F96560089181&data=05%7C02%7Caqnk%40chevron.com%7Cd723f4a08ed34ceeb46308ddfcc6524e%7Cfd799da1bfc14234a91c72b3a1cb9e26%7C0%7C0%7C638944650891718872%7CUnknown%7CTWFpbGZsb3d8eyJFbXB0eU1hcGkiOnRydWUsIlYiOiIwLjAuMDAwMCIsIlAiOiJXaW4zMiIsIkFOIjoiTWFpbCIsIldUIjoyfQ%3D%3D%7C0%7C%7C%7C&sdata=fMF9%2BRsT%2Br6qFB60YEKtloyzcSSqeQ%2BcP9zwn8QamB0%3D&reserved=0"
+              href="https://wa.me/96560089181"
               target="_blank"
               rel="noopener noreferrer"
               style={{
-                display: "inline-block",
-                padding: "12px 20px",
-                borderRadius: "8px",
-                backgroundColor: "#25D366",
-                color: "#fff",
-                fontWeight: "bold",
-                textDecoration: "none",
+                display: 'inline-block',
+                padding: '12px 20px',
+                borderRadius: '8px',
+                backgroundColor: '#25D366',
+                color: '#fff',
+                fontWeight: 'bold',
+                textDecoration: 'none'
               }}
             >
               📷 أرسل صورة على واتساب
@@ -154,13 +165,19 @@ const SearchSection: React.FC<SearchSectionProps> = ({ onSearchStart, onSearchCo
           results={searchResults.products}
           searchQuery={searchResults.searchQuery}
           processingTime={searchResults.processingTime}
-          onClose={() => setSearchResults(null)}
+          onClose={handleCloseResults}
+          imagePreview={previewUrl}
         />
       )}
 
       {error && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className={`bg-white rounded-2xl p-8 max-w-sm w-full text-center ${isRTL ? 'font-arabic' : ''}`} dir={isRTL ? 'rtl' : 'ltr'}>
+          <div
+            className={`bg-white rounded-2xl p-8 max-w-sm w-full text-center ${
+              isRTL ? 'font-arabic' : ''
+            }`}
+            dir={isRTL ? 'rtl' : 'ltr'}
+          >
             <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
               <span className="text-2xl">⚠️</span>
             </div>
