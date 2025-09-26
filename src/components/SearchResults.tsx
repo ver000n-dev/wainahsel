@@ -1,91 +1,62 @@
+// src/components/SearchResults.tsx
 import React from 'react';
-import { ExternalLink, Star, Clock, Zap } from 'lucide-react';
+import { X, Tag } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
-import { SearchResult } from '../services/aiSearch';
+import type { SearchResult } from '../services/aiSearch';
 
-interface SearchResultsProps {
+interface Props {
   results: SearchResult[];
   searchQuery: string;
   processingTime: number;
   onClose: () => void;
+  imagePreview?: string | null;
 }
 
-const SearchResults: React.FC<SearchResultsProps> = ({ 
-  results, 
-  searchQuery, 
-  processingTime, 
-  onClose 
+const SearchResults: React.FC<Props> = ({
+  results,
+  searchQuery,
+  processingTime,
+  onClose,
+  imagePreview
 }) => {
-  const { t, isRTL } = useLanguage();
+  const { isRTL, t } = useLanguage();
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className={`bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-hidden ${isRTL ? 'font-arabic' : ''}`} dir={isRTL ? 'rtl' : 'ltr'}>
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4" dir={isRTL ? 'rtl' : 'ltr'}>
+      <div className="w-full max-w-4xl rounded-3xl overflow-hidden bg-slate-900 border border-white/10">
         {/* Header */}
-        <div className="bg-gradient-to-r from-purple-600 to-blue-600 text-white p-6">
-          <div className={`flex ${isRTL ? 'flex-row-reverse' : 'flex-row'} items-center justify-between mb-4`}>
-            <h2 className="text-2xl font-bold">{t('searchResults')}</h2>
-            <button
-              onClick={onClose}
-              className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center hover:bg-white/30 transition-colors"
-            >
-              ×
-            </button>
-          </div>
-          
-          <div className={`flex ${isRTL ? 'flex-row-reverse' : 'flex-row'} items-center gap-4 text-sm text-white/80`}>
-            <div className={`flex ${isRTL ? 'flex-row-reverse' : 'flex-row'} items-center gap-2`}>
-              <Zap className="w-4 h-4" />
-              <span>{t('query')}: {searchQuery}</span>
-            </div>
-            <div className={`flex ${isRTL ? 'flex-row-reverse' : 'flex-row'} items-center gap-2`}>
-              <Clock className="w-4 h-4" />
-              <span>{processingTime}s</span>
-            </div>
-            <div className={`flex ${isRTL ? 'flex-row-reverse' : 'flex-row'} items-center gap-2`}>
-              <Star className="w-4 h-4" />
-              <span>{results.length} {t('products')}</span>
+        <div className="flex items-center justify-between px-6 py-4 bg-gradient-to-r from-indigo-600 to-violet-600">
+          <div className="text-white">
+            <div className="font-bold">{t('searchResults') ?? 'نتائج البحث'}</div>
+            <div className="text-white/80 text-sm">
+              {searchQuery} · {processingTime}s · {t('products') ?? 'المنتجات'} {results.length}
             </div>
           </div>
+          <button onClick={onClose} className="text-white/90 hover:text-white p-2"><X size={18} /></button>
         </div>
 
-        {/* Results */}
-        <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {results.map((product) => (
-              <div key={product.id} className="bg-gray-50 rounded-xl p-4 hover:shadow-lg transition-shadow">
-                <div className="aspect-square bg-white rounded-lg mb-4 overflow-hidden">
-                  <img
-                    src={product.imageUrl}
-                    alt={product.name}
-                    className="w-full h-full object-cover"
-                  />
+        {/* Body */}
+        <div className="p-6">
+          {imagePreview && (
+            <img src={imagePreview} alt="preview" className="w-full max-h-72 object-contain rounded-xl mb-6 bg-white/5" />
+          )}
+
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {results.map((r) => (
+              <div key={r.id} className="bg-white/5 border border-white/10 rounded-2xl p-4">
+                <div className="flex items-center gap-2 text-white font-medium">
+                  <Tag size={16} /> {r.name}
                 </div>
-                
-                <div className="space-y-2">
-                  <h3 className="font-semibold text-gray-900 line-clamp-2">{product.name}</h3>
-                  <p className="text-sm text-gray-600 line-clamp-2">{product.description}</p>
-                  
-                  <div className={`flex ${isRTL ? 'flex-row-reverse' : 'flex-row'} items-center justify-between`}>
-                    <div className="text-lg font-bold text-purple-600">
-                      {product.price} {product.currency}
-                    </div>
-                    <div className="text-sm text-gray-500">{product.store}</div>
-                  </div>
-                  
-                  <div className={`flex ${isRTL ? 'flex-row-reverse' : 'flex-row'} items-center justify-between pt-2`}>
-                    <div className="text-xs text-green-600">
-                      {Math.round(product.confidence * 100)}% {t('match')}
-                    </div>
-                    <button className={`flex ${isRTL ? 'flex-row-reverse' : 'flex-row'} items-center gap-1 text-blue-600 hover:text-blue-700 text-sm`}>
-                      <ExternalLink className="w-4 h-4" />
-                      <span>{t('viewProduct')}</span>
-                    </button>
-                  </div>
+                <div className="mt-2 text-white/70 text-sm">
+                  {(r.confidence ?? 0) > 0 ? `ثقة ${r.confidence}%` : t('noDetails') ?? ''}
                 </div>
               </div>
             ))}
           </div>
+
+          {results.length === 0 && (
+            <div className="text-center text-white/70 py-10">ما في نتائج واضحة للصورة.</div>
+          )}
         </div>
       </div>
     </div>
