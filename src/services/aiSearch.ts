@@ -55,6 +55,38 @@ export class AIVisualSearchService {
     });
   }
 
+  // تحويل HEIC/HEIF إلى JPEG (إن وُجد) ثم إرجاع DataURL
+  private async toJpegDataURL(file: File): Promise<string> {
+    const isHeic =
+      /heic|heif/i.test(file.type) ||
+      /\.hei[c|f]$/i.test(file.name);
+
+    if (!isHeic) {
+      // ليست HEIC: نرجّع الصورة كما هي
+      return await this.fileToDataURL(file);
+    }
+
+    try {
+      const { default: heic2any } = await import('heic2any');
+      const jpegBlob = (await heic2any({
+        blob: file,
+        toType: 'image/jpeg',
+        quality: 0.92,
+      })) as Blob;
+
+      // حوّل الـ Blob الناتج إلى DataURL
+      return await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result || ''));
+        r.onerror = reject;
+        r.readAsDataURL(jpegBlob);
+      });
+    } catch {
+      // لو failed لأي سبب، نرجع الملف كما هو بدل ما نكسر التدفق
+      return await this.fileToDataURL(file);
+    }
+  }
+
   private loadImage(dataUrl: string): Promise<HTMLImageElement> {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -78,7 +110,7 @@ export class AIVisualSearchService {
     const img = await this.loadImage(originalDataUrl);
     const v: Array<{ x: number; y: number }> = loc.primary.vertices;
 
-    // احسب المستطيل (بنسب 0..1) + هامش صغير
+    // احسب المستطيل (بنسب 0..1) مع هامش صغير
     let minX = Math.min(...v.map((p) => p.x));
     let maxX = Math.max(...v.map((p) => p.x));
     let minY = Math.min(...v.map((p) => p.y));
@@ -117,8 +149,8 @@ export class AIVisualSearchService {
   async analyzeImage(imageFile: File): Promise<AISearchResponse> {
     const t0 = performance.now();
 
-    // 1) اقرأ الصورة كـ DataURL
-    const originalDataUrl = await this.fileToDataURL(imageFile);
+    // 1) اقرأ الصورة كـ DataURL — مع تحويل HEIC → JPEG إن لزم
+    const originalDataUrl = await this.toJpegDataURL(imageFile);
 
     // 2) جرّب قصّ الكائن الأساسي
     let toSend = originalDataUrl;
@@ -129,7 +161,7 @@ export class AIVisualSearchService {
       // لا شيء: نتابع بالصورة الأصلية
     }
 
-    // 3) اطلب WEB_DETECTION
+    // 3) اطلب WEB_DETECTION (وملفاتنا الخلفية قد ترجع OCR أيضًا)
     const resp = await fetch(`/api/vision?ts=${Date.now()}`, {
       method: 'POST',
       headers: {
