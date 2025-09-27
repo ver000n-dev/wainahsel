@@ -1,7 +1,18 @@
-// api/vision.ts — طباعة تفاصيل خطأ Vision لسهولة التشخيص
+// /pages/api/vision.ts
+// - يفعّل WEB_DETECTION (يرجع fullMatchingImages / partialMatchingImages / visuallySimilarImages)
+// - يدعم dataURL أو raw base64
+// - يطبع أخطاء Google بالكامل للتشخيص
+// - يضبط حجم البودي ويمنع الكاش
 
-export default async function handler(req: any, res: any) {
+import type { NextApiRequest, NextApiResponse } from 'next';
+
+export const config = { api: { bodyParser: { sizeLimit: '8mb' } } };
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+
     if (req.method !== 'POST') {
       return res.status(405).json({ error: 'Method not allowed' });
     }
@@ -15,24 +26,43 @@ export default async function handler(req: any, res: any) {
     let parsed: any = {};
     try {
       parsed = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-    } catch {}
-    const { imageBase64 } = parsed || {};
+    } catch {
+      parsed = req.body || {};
+    }
+
+    let { imageBase64 } = parsed as { imageBase64?: string };
     if (!imageBase64) {
       return res.status(400).json({ error: 'imageBase64 is required' });
     }
 
-    const gRes = await fetch('https://vision.googleapis.com/v1/images:annotate?key=' + apiKey, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        requests: [
-          {
-            image: { content: imageBase64 },
-            features: [{ type: 'LABEL_DETECTION', maxResults: 5 }]
-          }
-        ]
-      })
-    });
+    // يقبل dataURL أو raw base64
+    const content =
+      imageBase64.startsWith('data:') ? imageBase64.split(',').pop() : imageBase64;
+
+    const payload = {
+      requests: [
+        {
+          image: { content },
+          // 🎯 المهم الآن: WEB_DETECTION للحصول على الصور المطابقة/المشابهة وروابط الصفحات
+          features: [{ type: 'WEB_DETECTION', maxResults: 10 }],
+          imageContext: {
+            webDetectionParams: { includeGeoResults: true },
+          },
+        },
+      ],
+    };
+
+    const gRes = await fetch(
+      'https://vision.googleapis.com/v1/images:annotate?key=' + apiKey,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+        },
+        body: JSON.stringify(payload),
+      }
+    );
 
     const text = await gRes.text();
 
@@ -40,25 +70,33 @@ export default async function handler(req: any, res: any) {
       // 🔴 اطبع نص ردّ Google بالكامل في Runtime Logs
       console.error('[VisionAPIError]', text);
       let j: any = {};
-      try { j = JSON.parse(text); } catch { j = { raw: text }; }
-      // أعد الكود والرسالة للواجهة لتظهر بوضوح
+      try {
+        j = JSON.parse(text);
+      } catch {
+        j = { raw: text };
+      }
       const err = j?.error || {};
-      return res.status(500).json({
+      return res.status(gRes.status || 500).json({
         error: 'VisionAPIError',
         code: err.code,
         status: err.status,
         message: err.message,
-        details: err.details || j.raw || null
+        details: err.details || j.raw || null,
       });
     }
 
-    // نجاح
+    // ✅ نجاح
     let data: any = {};
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { raw: text };
+    }
     return res.status(200).json(data);
-
   } catch (e: any) {
     console.error('[VisionAPI_Internal]', e?.message || e);
-    return res.status(500).json({ error: 'Internal', message: e?.message || 'unknown' });
+    return res
+      .status(500)
+      .json({ error: 'Internal', message: e?.message || 'unknown' });
   }
 }
