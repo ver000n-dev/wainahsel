@@ -19,7 +19,7 @@ export interface SearchResult {
   productUrl?: string;
 
   // التشابه
-  confidence?: number;    // % إن وصلتنا من المصدر (متوافق مع كودك القديم)
+  confidence?: number;    // % إن وصلتنا من المصدر
   similarity?: number;    // 0..1 (يُشتق من confidence إن وُجد)
 
   // الموقع (اختياري)
@@ -107,12 +107,11 @@ function parsePrice(raw?: string): { currency?: string; value?: number } {
   return { currency: cur, value: isNaN(num) ? undefined : num };
 }
 
-// توحيد/تنظيف نتيجة واحدة
+// ——— normalizeResult (إصدار يمنع اعتبار imageUrl متجرًا)
 function normalizeResult(r: SearchResult): SearchResult {
-  // استنتاج الدومين إن لم يوجد
-  if (!r.storeDomain) {
-    const src = r.productUrl || r.imageUrl;
-    const d = hostnameOf(src);
+  // ❌ لا نستنتج المتجر من imageUrl — فقط من productUrl
+  if (!r.storeDomain && r.productUrl) {
+    const d = hostnameOf(r.productUrl);
     if (d) {
       r.storeDomain = d;
       if (!r.store) r.store = d;
@@ -131,51 +130,68 @@ function normalizeResult(r: SearchResult): SearchResult {
     if (value != null) r.priceValue = value;
   }
 
-  // البلد التقريبي
-  if (!r.countryCode) r.countryCode = inferCountryFromDomain(r.storeDomain);
+  // البلد التقريبي من الدومين (إن وُجد)
+  if (!r.countryCode && r.storeDomain) r.countryCode = inferCountryFromDomain(r.storeDomain);
 
   return r;
 }
 
-// ترتيب + فلترة (90% فأعلى أولًا، ثم التشابه، ثم بلد المستخدم، ثم الأرخص)
+// ——— rankAndFilter مع خيار requireLink
 export function rankAndFilter(
   items: SearchResult[],
-  opts?: { userCountry?: string; minSimilarity?: number; onlyTrusted?: boolean; allowCrossBorder?: boolean }
+  opts?: {
+    userCountry?: string;
+    minSimilarity?: number;
+    onlyTrusted?: boolean;
+    allowCrossBorder?: boolean;
+    requireLink?: boolean; // نعرض فقط النتائج التي عندها رابط منتج
+  }
 ) {
   const {
     userCountry = 'KW',
     minSimilarity = 0.60,
-    onlyTrusted = false,     // افتراضيًا لا نحصر حتى لا تختفي النتائج لو كلها صور
+    onlyTrusted = false,
     allowCrossBorder = true,
+    requireLink = true,
   } = opts || {};
 
   const cleaned = items.map(normalizeResult).filter(r => {
+    if (requireLink && !r.productUrl) return false;        // رابط منتج إلزامي بالفرز الأساسي
     if (r.similarity == null || r.similarity < minSimilarity) return false;
-    if (onlyTrusted && !isTrustedStore(r.storeDomain)) return false;
+    if (onlyTrusted && (!r.storeDomain || !isTrustedStore(r.storeDomain))) return false;
     return true;
   });
 
   cleaned.sort((a,b) => {
-    // 1) ≥90% أولًا
+    // 0) وجود رابط منتج أولاً (احتياط لو requireLink=false)
+    const aLink = a.productUrl ? 1 : 0;
+    const bLink = b.productUrl ? 1 : 0;
+    if (aLink !== bLink) return bLink - aLink;
+
+    // 1) متجر موثوق أولاً
+    const aTrust = isTrustedStore(a.storeDomain) ? 1 : 0;
+    const bTrust = isTrustedStore(b.storeDomain) ? 1 : 0;
+    if (aTrust !== bTrust) return bTrust - aTrust;
+
+    // 2) ≥90% أولًا
     const a90 = (a.similarity ?? 0) >= 0.90 ? 1 : 0;
     const b90 = (b.similarity ?? 0) >= 0.90 ? 1 : 0;
     if (a90 !== b90) return b90 - a90;
 
-    // 2) التشابه نزولياً
+    // 3) التشابه نزولياً
     const sim = (b.similarity ?? 0) - (a.similarity ?? 0);
     if (Math.abs(sim) > 1e-6) return sim;
 
-    // 3) بلد المستخدم أولاً
+    // 4) بلد المستخدم
     const aLoc = a.countryCode === userCountry ? 1 : 0;
     const bLoc = b.countryCode === userCountry ? 1 : 0;
     if (aLoc !== bLoc) return bLoc - aLoc;
 
-    // 4) السعر تصاعدياً
+    // 5) السعر تصاعدياً
     const ap = a.priceValue ?? Number.POSITIVE_INFINITY;
     const bp = b.priceValue ?? Number.POSITIVE_INFINITY;
     if (ap !== bp) return ap - bp;
 
-    // 5) ثبات: اسم الدومين
     return (a.storeDomain||'').localeCompare(b.storeDomain||'');
   });
 
@@ -209,7 +225,6 @@ export class AIVisualSearchService {
       /\.hei[c|f]$/i.test(file.name);
 
     if (!isHeic) {
-      // ليست HEIC: نرجّع الصورة كما هي
       return await this.fileToDataURL(file);
     }
 
@@ -221,7 +236,6 @@ export class AIVisualSearchService {
         quality: 0.92,
       })) as Blob;
 
-      // حوّل الـ Blob الناتج إلى DataURL
       return await new Promise<string>((resolve, reject) => {
         const r = new FileReader();
         r.onload = () => resolve(String(r.result || ''));
@@ -229,7 +243,6 @@ export class AIVisualSearchService {
         r.readAsDataURL(jpegBlob);
       });
     } catch {
-      // لو failed لأي سبب، نرجع الملف كما هو بدل ما نكسر التدفق
       return await this.fileToDataURL(file);
     }
   }
@@ -285,7 +298,6 @@ export class AIVisualSearchService {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
 
-    // JPEG يقلّل الحجم ويكفي للبحث
     const croppedDataUrl = canvas.toDataURL('image/jpeg', 0.92);
     return croppedDataUrl;
   }
@@ -294,11 +306,9 @@ export class AIVisualSearchService {
 
   /**
    * يرسل القصاصة (إن وُجدت) إلى /api/vision الذي يطلب WEB_DETECTION
-   * ثم يُطبِّق الترتيب المطلوب:
-   *  - ≥90% أولًا
-   *  - ثم التشابه
-   *  - ثم بلد المستخدم
-   *  - ثم الأرخص
+   * ثم يُطبِّق ترتيبًا بمرحلتين:
+   *  1) روابط منتجات من متاجر موثوقة أولًا
+   *  2) توسعة ذكية، ثم كخيار أخير صور فقط إذا النتائج قليلة جدًا
    */
   async analyzeImage(
     imageFile: File,
@@ -306,19 +316,17 @@ export class AIVisualSearchService {
   ): Promise<AISearchResponse> {
     const t0 = performance.now();
 
-    // 1) اقرأ الصورة كـ DataURL — مع تحويل HEIC → JPEG إن لزم
+    // 1) اقرأ الصورة (مع HEIC → JPEG إن لزم)
     const originalDataUrl = await this.toJpegDataURL(imageFile);
 
-    // 2) جرّب قصّ الكائن الأساسي
+    // 2) قصّ الكائن الأساسي إن أمكن
     let toSend = originalDataUrl;
     try {
       const cropped = await this.cropToPrimaryObject(originalDataUrl);
       if (cropped) toSend = cropped;
-    } catch {
-      // لا شيء: نتابع بالصورة الأصلية
-    }
+    } catch { /* ignore */ }
 
-    // 3) اطلب WEB_DETECTION (وملفاتنا الخلفية قد ترجع OCR أيضًا)
+    // 3) اطلب WEB_DETECTION
     const resp = await fetch(`/api/vision?ts=${Date.now()}`, {
       method: 'POST',
       headers: {
@@ -356,7 +364,7 @@ export class AIVisualSearchService {
         imageUrl: url,
         productUrl: undefined,
         store: hostnameOf(url),
-        storeDomain: hostnameOf(url),
+        storeDomain: undefined,   // ❗ لا نملأ من imageUrl
         confidence: 95,
         similarity: 0.95,
         description: 'Full matching image',
@@ -367,7 +375,7 @@ export class AIVisualSearchService {
         imageUrl: url,
         productUrl: undefined,
         store: hostnameOf(url),
-        storeDomain: hostnameOf(url),
+        storeDomain: undefined,   // ❗ لا نملأ من imageUrl
         confidence: 85,
         similarity: 0.85,
         description: 'Partial matching image',
@@ -378,7 +386,7 @@ export class AIVisualSearchService {
         imageUrl: url,
         productUrl: undefined,
         store: hostnameOf(url),
-        storeDomain: hostnameOf(url),
+        storeDomain: undefined,   // ❗ لا نملأ من imageUrl
         confidence: 70,
         similarity: 0.70,
         description: 'Visually similar image',
@@ -392,7 +400,7 @@ export class AIVisualSearchService {
       store: hostnameOf(p.url),
       storeDomain: hostnameOf(p.url),
       description: 'Page with matching images',
-      // مبدئيًا بدون سعر — ممكن لاحقًا استخراج schema.org/Offer
+      // لاحقًا ممكن استخراج السعر من schema.org/Offer
     }));
 
     const combinedRaw: SearchResult[] = [...imgProducts, ...pageProducts];
@@ -401,13 +409,43 @@ export class AIVisualSearchService {
     const normalized = combinedRaw.map(normalizeResult);
     const deduped = uniq(normalized, (x) => String(x.imageUrl || x.productUrl || x.name));
 
-    // ترتيب حسب المطلوب
-    const ranked = rankAndFilter(deduped, {
+    // ===== ترتيب بمرحلتين مع fallback =====
+    // 1) منتجات بروابط من متاجر موثوقة
+    let primary = rankAndFilter(deduped, {
       userCountry: opts?.userCountry ?? 'KW',
       minSimilarity: opts?.minSimilarity ?? 0.60,
-      onlyTrusted: opts?.onlyTrusted ?? false,      // يمكنك تمرير true من الواجهة لعرض متاجر فقط
-      allowCrossBorder: opts?.allowCrossBorder ?? true,
-    }).slice(0, 30);
+      onlyTrusted: true,
+      allowCrossBorder: true,
+      requireLink: true,
+    });
+
+    // 2) لو قليلة، نوسع (نقبل غير الموثوق لكن مع رابط)
+    if (primary.length < 6) {
+      const secondary = rankAndFilter(deduped, {
+        userCountry: opts?.userCountry ?? 'KW',
+        minSimilarity: 0.55,
+        onlyTrusted: false,
+        allowCrossBorder: true,
+        requireLink: true,
+      });
+      const seen = new Set(primary.map(p => p.id));
+      secondary.forEach(s => { if (!seen.has(s.id)) primary.push(s); });
+    }
+
+    // 3) لو ما زالت قليلة جدًا، آخر حل: صور فقط (بدون رابط) كمرجع بصري
+    if (primary.length < 3) {
+      const imgs = rankAndFilter(deduped, {
+        userCountry: opts?.userCountry ?? 'KW',
+        minSimilarity: 0.50,
+        onlyTrusted: false,
+        allowCrossBorder: true,
+        requireLink: false,
+      }).filter(p => !p.productUrl);
+      const seen = new Set(primary.map(p => p.id));
+      imgs.forEach(s => { if (!seen.has(s.id)) primary.push(s); });
+    }
+
+    const ranked = primary.slice(0, 30);
 
     return {
       products: ranked,
