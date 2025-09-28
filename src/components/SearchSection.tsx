@@ -1,7 +1,9 @@
+// src/components/SearchSection.tsx
+
 import React from 'react';
 import { Camera, Upload, Image as ImageIcon } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
-import { AIVisualSearchService } from '../services/aiSearch';
+import { AIVisualSearchService, rankAndFilter } from '../services/aiSearch';
 import SearchResults from './SearchResults';
 import LoadingOverlay from './LoadingOverlay';
 
@@ -17,6 +19,9 @@ const SearchSection: React.FC<SearchSectionProps> = ({ onSearchStart, onSearchCo
   const [searchResults, setSearchResults] = React.useState<any>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = React.useState<string | null>(null);
+
+  // بلد المستخدم (لاحقًا خذه من GeoIP أو إعداد المستخدم)
+  const userCountry = 'KW';
 
   // خدمة التحليل
   const aiSearchService = React.useMemo(
@@ -42,9 +47,23 @@ const SearchSection: React.FC<SearchSectionProps> = ({ onSearchStart, onSearchCo
       const url = URL.createObjectURL(file);
       setPreviewUrl(url);
 
-      // استدعاء خدمة الرؤية عبر مسار /api/vision (السيرفر يقرأ VISION_API_KEY)
-      const results = await aiSearchService.analyzeImage(file);
-      setSearchResults(results);
+      // استدعاء خدمة الرؤية عبر /api/vision وتمرير خيارات الترتيب
+      const resp = await aiSearchService.analyzeImage(file, {
+        userCountry,
+        minSimilarity: 0.60,
+        onlyTrusted: true,     // اعرض متاجر فعلية فقط
+        allowCrossBorder: true // اسمح بدول أخرى إن لم توجد محلية
+      });
+
+      // طبّق ترتيبًا نهائيًا (حماية مزدوجة لو تغيّر السلوك الخلفي)
+      const ranked = rankAndFilter(resp.products, {
+        userCountry,
+        minSimilarity: 0.60,
+        onlyTrusted: true,
+        allowCrossBorder: true,
+      });
+
+      setSearchResults({ ...resp, products: ranked, userCountry });
     } catch (err) {
       console.error(err);
       setError(t('searchErrorDesc'));
