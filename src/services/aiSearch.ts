@@ -4,18 +4,36 @@ export interface SearchResult {
   id: string;
   name: string;
   description?: string;
-  price?: string;
-  currency?: string;
-  store?: string;
+
+  // الأسعار
+  price?: string;         // نص خام مثل "12.50 KWD" أو "ر.س 99"
+  currency?: string;      // "KWD" | "SAR" | "AED" | "USD" ...
+  priceValue?: number;    // 12.5 (للفرز)
+
+  // المتجر
+  store?: string;         // اسم/دومين للعرض
+  storeDomain?: string;   // hostname صافي مثل "amazon.sa"
+
+  // الروابط والصور
   imageUrl?: string;
   productUrl?: string;
-  confidence?: number; // %
+
+  // التشابه
+  confidence?: number;    // % إن وصلتنا من المصدر (متوافق مع كودك القديم)
+  similarity?: number;    // 0..1 (يُشتق من confidence إن وُجد)
+
+  // الموقع (اختياري)
+  countryCode?: string;   // "KW" | "SA" | "AE" | ...
+
+  // داخلي للفرز
+  _rankScore?: number;
 }
 
 export interface AISearchResponse {
   products: SearchResult[];
   searchQuery: string;
   processingTime: number;
+  userCountry?: string;
 }
 
 function hostnameOf(url: string | undefined): string | undefined {
@@ -36,6 +54,135 @@ function uniq<T>(arr: T[], keyFn: (x: T) => string): T[] {
   }
   return out;
 }
+
+// ----------------- إضافات الموثوقية/الأسعار/الموقع -----------------
+
+// متاجر موثوقة (زِد عليها ما تشاء)
+const TRUSTED_DOMAINS = [
+  'amazon.sa','amazon.ae','amazon.com',
+  'noon.com',
+  'xcite.com','x-cite.com',
+  'jarir.com','extra.com',
+  'carrefourksa.com','carrefouruae.com',
+  'luluhypermarket.com','ikea.com','shein.com','namshi.com'
+];
+
+function isTrustedStore(domain?: string) {
+  if (!domain) return false;
+  return TRUSTED_DOMAINS.some(t => domain.endsWith(t));
+}
+
+// ربط دومين → بلد (تقريبي)
+const DOMAIN_TO_COUNTRY: Record<string,string> = {
+  'amazon.sa':'SA',
+  'amazon.ae':'AE',
+  'xcite.com':'KW','x-cite.com':'KW',
+  'jarir.com':'SA','extra.com':'SA',
+  'carrefourksa.com':'SA','carrefouruae.com':'AE',
+  'luluhypermarket.com':'AE',
+};
+
+function inferCountryFromDomain(d?: string) {
+  if (!d) return undefined;
+  const key = Object.keys(DOMAIN_TO_COUNTRY).find(k => d.endsWith(k));
+  return key ? DOMAIN_TO_COUNTRY[key] : undefined;
+}
+
+// استخراج قيمة رقمية وعملة من نص السعر
+function parsePrice(raw?: string): { currency?: string; value?: number } {
+  if (!raw) return {};
+  const MAP: Record<string,string> = {
+    'KWD':'KWD','د.ك':'KWD','KD':'KWD',
+    'SAR':'SAR','ر.س':'SAR','ريال':'SAR',
+    'AED':'AED','د.إ':'AED',
+    'USD':'USD','$':'USD'
+  };
+  // يدعم "12.50 KWD" أو "KWD 12.50" أو "ر.س 99"
+  const m = raw.match(/([\d.,]+)\s*(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)/i)
+        || raw.match(/(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)\s*([\d.,]+)/i);
+  if (!m) return {};
+  const num = parseFloat((m[1]||m[2]).replace(/,/g,''));
+  const curKey = (m[2]||m[1]||'').toUpperCase();
+  const cur = MAP[curKey];
+  return { currency: cur, value: isNaN(num) ? undefined : num };
+}
+
+// توحيد/تنظيف نتيجة واحدة
+function normalizeResult(r: SearchResult): SearchResult {
+  // استنتاج الدومين إن لم يوجد
+  if (!r.storeDomain) {
+    const src = r.productUrl || r.imageUrl;
+    const d = hostnameOf(src);
+    if (d) {
+      r.storeDomain = d;
+      if (!r.store) r.store = d;
+    }
+  }
+
+  // تحويل confidence% → similarity 0..1
+  if (r.similarity == null && r.confidence != null && !isNaN(r.confidence)) {
+    r.similarity = Math.max(0, Math.min(1, r.confidence / 100));
+  }
+
+  // السعر الرقمي
+  if (r.price && (r.priceValue == null || !r.currency)) {
+    const {currency, value} = parsePrice(r.price);
+    if (currency) r.currency = currency;
+    if (value != null) r.priceValue = value;
+  }
+
+  // البلد التقريبي
+  if (!r.countryCode) r.countryCode = inferCountryFromDomain(r.storeDomain);
+
+  return r;
+}
+
+// ترتيب + فلترة (90% فأعلى أولًا، ثم التشابه، ثم بلد المستخدم، ثم الأرخص)
+export function rankAndFilter(
+  items: SearchResult[],
+  opts?: { userCountry?: string; minSimilarity?: number; onlyTrusted?: boolean; allowCrossBorder?: boolean }
+) {
+  const {
+    userCountry = 'KW',
+    minSimilarity = 0.60,
+    onlyTrusted = false,     // افتراضيًا لا نحصر حتى لا تختفي النتائج لو كلها صور
+    allowCrossBorder = true,
+  } = opts || {};
+
+  const cleaned = items.map(normalizeResult).filter(r => {
+    if (r.similarity == null || r.similarity < minSimilarity) return false;
+    if (onlyTrusted && !isTrustedStore(r.storeDomain)) return false;
+    return true;
+  });
+
+  cleaned.sort((a,b) => {
+    // 1) ≥90% أولًا
+    const a90 = (a.similarity ?? 0) >= 0.90 ? 1 : 0;
+    const b90 = (b.similarity ?? 0) >= 0.90 ? 1 : 0;
+    if (a90 !== b90) return b90 - a90;
+
+    // 2) التشابه نزولياً
+    const sim = (b.similarity ?? 0) - (a.similarity ?? 0);
+    if (Math.abs(sim) > 1e-6) return sim;
+
+    // 3) بلد المستخدم أولاً
+    const aLoc = a.countryCode === userCountry ? 1 : 0;
+    const bLoc = b.countryCode === userCountry ? 1 : 0;
+    if (aLoc !== bLoc) return bLoc - aLoc;
+
+    // 4) السعر تصاعدياً
+    const ap = a.priceValue ?? Number.POSITIVE_INFINITY;
+    const bp = b.priceValue ?? Number.POSITIVE_INFINITY;
+    if (ap !== bp) return ap - bp;
+
+    // 5) ثبات: اسم الدومين
+    return (a.storeDomain||'').localeCompare(b.storeDomain||'');
+  });
+
+  return allowCrossBorder ? cleaned : cleaned.filter(r => r.countryCode === userCountry);
+}
+
+// ===================================================================
 
 export class AIVisualSearchService {
   private static instance: AIVisualSearchService;
@@ -145,8 +292,18 @@ export class AIVisualSearchService {
 
   // -------- Main --------
 
-  // يرسل القصاصة (إن وُجدت) إلى /api/vision الذي يطلب WEB_DETECTION
-  async analyzeImage(imageFile: File): Promise<AISearchResponse> {
+  /**
+   * يرسل القصاصة (إن وُجدت) إلى /api/vision الذي يطلب WEB_DETECTION
+   * ثم يُطبِّق الترتيب المطلوب:
+   *  - ≥90% أولًا
+   *  - ثم التشابه
+   *  - ثم بلد المستخدم
+   *  - ثم الأرخص
+   */
+  async analyzeImage(
+    imageFile: File,
+    opts?: { userCountry?: string; minSimilarity?: number; onlyTrusted?: boolean; allowCrossBorder?: boolean }
+  ): Promise<AISearchResponse> {
     const t0 = performance.now();
 
     // 1) اقرأ الصورة كـ DataURL — مع تحويل HEIC → JPEG إن لزم
@@ -191,7 +348,7 @@ export class AIVisualSearchService {
         .map((p: any) => ({ url: p?.url, title: p?.pageTitle }))
         .filter((p: any) => !!p.url);
 
-    // نبني Products
+    // نبني Products (صور مطابقة/مشابهة + صفحات)
     let imgProducts: SearchResult[] = [
       ...fullImgs.map((url, idx) => ({
         id: `img-full-${idx + 1}`,
@@ -199,7 +356,9 @@ export class AIVisualSearchService {
         imageUrl: url,
         productUrl: undefined,
         store: hostnameOf(url),
+        storeDomain: hostnameOf(url),
         confidence: 95,
+        similarity: 0.95,
         description: 'Full matching image',
       })),
       ...partialImgs.map((url, idx) => ({
@@ -208,7 +367,9 @@ export class AIVisualSearchService {
         imageUrl: url,
         productUrl: undefined,
         store: hostnameOf(url),
+        storeDomain: hostnameOf(url),
         confidence: 85,
+        similarity: 0.85,
         description: 'Partial matching image',
       })),
       ...similarImgs.map((url, idx) => ({
@@ -217,7 +378,9 @@ export class AIVisualSearchService {
         imageUrl: url,
         productUrl: undefined,
         store: hostnameOf(url),
+        storeDomain: hostnameOf(url),
         confidence: 70,
+        similarity: 0.70,
         description: 'Visually similar image',
       })),
     ];
@@ -227,16 +390,30 @@ export class AIVisualSearchService {
       name: p.title?.trim() || bestGuess,
       productUrl: p.url,
       store: hostnameOf(p.url),
+      storeDomain: hostnameOf(p.url),
       description: 'Page with matching images',
+      // مبدئيًا بدون سعر — ممكن لاحقًا استخراج schema.org/Offer
     }));
 
     const combinedRaw: SearchResult[] = [...imgProducts, ...pageProducts];
-    const products = uniq(combinedRaw, (x) => String(x.imageUrl || x.productUrl || x.name)).slice(0, 30);
+
+    // تنظيف + إزالة التكرار
+    const normalized = combinedRaw.map(normalizeResult);
+    const deduped = uniq(normalized, (x) => String(x.imageUrl || x.productUrl || x.name));
+
+    // ترتيب حسب المطلوب
+    const ranked = rankAndFilter(deduped, {
+      userCountry: opts?.userCountry ?? 'KW',
+      minSimilarity: opts?.minSimilarity ?? 0.60,
+      onlyTrusted: opts?.onlyTrusted ?? false,      // يمكنك تمرير true من الواجهة لعرض متاجر فقط
+      allowCrossBorder: opts?.allowCrossBorder ?? true,
+    }).slice(0, 30);
 
     return {
-      products,
+      products: ranked,
       searchQuery: bestGuess + (toSend !== originalDataUrl ? ' · cropped' : ''),
       processingTime: Math.round((performance.now() - t0)) / 1000,
+      userCountry: opts?.userCountry ?? 'KW',
     };
   }
 
