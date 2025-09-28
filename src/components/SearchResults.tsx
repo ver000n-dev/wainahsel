@@ -12,16 +12,15 @@ interface Props {
   imagePreview?: string | null;
 }
 
-const badgeColor = (desc?: string) => {
-  if (!desc) return 'bg-slate-700 text-white/90';
-  const d = desc.toLowerCase();
-  if (d.includes('full')) return 'bg-emerald-600 text-white';
-  if (d.includes('partial')) return 'bg-amber-600 text-white';
-  if (d.includes('similar')) return 'bg-indigo-600 text-white';
-  return 'bg-slate-700 text-white/90';
-};
+const fmtPercent = (v?: number) =>
+  typeof v === 'number' ? `${Math.round(v * 100)}%` : '—';
 
-const fmtPct = (v?: number) => (typeof v === 'number' ? `${Math.round(v)}%` : '');
+const fmtPrice = (price?: string, val?: number, cur?: string) =>
+  price
+    ? price
+    : val != null && cur
+    ? `${val.toFixed(2)} ${cur}`
+    : '—';
 
 const SearchResults: React.FC<Props> = ({
   results,
@@ -63,14 +62,12 @@ const SearchResults: React.FC<Props> = ({
       role="dialog"
       aria-modal="true"
     >
-      {/* نمنع تمركز عمودي ثابت حتى لا يقطع المحتوى الطويل */}
       <div className="h-full w-full flex items-start justify-center p-4 md:p-6 overflow-hidden">
-        {/* لوحة المودال */}
         <div
           className="w-full max-w-5xl bg-slate-900 border border-white/10 rounded-3xl shadow-2xl overflow-hidden"
-          onClick={(e) => e.stopPropagation()} // منع إغلاق عند الضغط داخل المودال
+          onClick={(e) => e.stopPropagation()}
         >
-          {/* Header ثابت */}
+          {/* Header */}
           <div className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 bg-gradient-to-r from-indigo-600 to-violet-600">
             <div className="text-white">
               <div className="font-bold">{t('searchResults') ?? 'نتائج البحث'}</div>
@@ -87,11 +84,8 @@ const SearchResults: React.FC<Props> = ({
             </button>
           </div>
 
-          {/* المحتوى قابل للتمرير داخل المودال */}
-          <div
-            className="px-6 pb-6 overflow-y-auto"
-            style={{ maxHeight: 'calc(100vh - 96px)' }} // ارتفاع النافذة ناقص الهيدر
-          >
+          {/* المحتوى */}
+          <div className="px-6 pb-6 overflow-y-auto" style={{ maxHeight: 'calc(100vh - 96px)' }}>
             {imagePreview && (
               <img
                 src={imagePreview}
@@ -111,13 +105,12 @@ const SearchResults: React.FC<Props> = ({
                     key={r.id}
                     className="bg-white/5 border border-white/10 rounded-2xl overflow-hidden flex flex-col"
                   >
-                    {/* صورة النتيجة */}
+                    {/* الصورة */}
                     {r.imageUrl ? (
                       <a
                         href={r.productUrl || r.imageUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="block"
                         title={r.name}
                       >
                         <img
@@ -133,43 +126,43 @@ const SearchResults: React.FC<Props> = ({
                       </div>
                     )}
 
-                    {/* معلومات */}
+                    {/* التفاصيل */}
                     <div className="p-4 space-y-2 grow">
                       <div className="flex items-center gap-2 text-white font-medium">
                         <Tag size={16} />
                         <span className="line-clamp-2">{r.name}</span>
                       </div>
 
-                      {r.description && (
-                        <div
-                          className={`inline-block text-xs px-2 py-1 rounded-full ${badgeColor(
-                            r.description
-                          )}`}
-                        >
-                          {r.description}
-                        </div>
-                      )}
-
-                      {r.store && (
+                      {/* اسم الموقع */}
+                      {r.storeDomain && (
                         <div className="text-xs text-white/70">
-                          {t('store') ?? 'المتجر'}: {r.store}
+                          🏪 {t('store') ?? 'المتجر'}: {r.storeDomain}
                         </div>
                       )}
 
-                      {typeof r.confidence === 'number' && (
+                      {/* نسبة التشابه */}
+                      {typeof r.similarity === 'number' && (
                         <div className="text-xs text-emerald-400">
-                          {(t('confidence') ?? 'الثقة')}: {fmtPct(r.confidence)}
+                          🎯 {(t('similarity') ?? 'نسبة التطابق')}: {fmtPercent(r.similarity)}
                         </div>
                       )}
 
-                      {(r.price || r.currency) && (
+                      {/* السعر */}
+                      {(r.price || r.priceValue) && (
                         <div className="text-sm text-white/90">
-                          {(t('price') ?? 'السعر')}: {r.price} {r.currency || ''}
+                          💰 {(t('price') ?? 'السعر')}: {fmtPrice(r.price, r.priceValue, r.currency)}
+                        </div>
+                      )}
+
+                      {/* الدولة */}
+                      {r.countryCode && (
+                        <div className="text-xs text-white/60">
+                          🌍 {(t('country') ?? 'الدولة')}: {r.countryCode}
                         </div>
                       )}
                     </div>
 
-                    {/* أزرار */}
+                    {/* الزر */}
                     <div className="p-4 pt-0 flex items-center gap-2">
                       {r.productUrl && (
                         <a
@@ -180,17 +173,6 @@ const SearchResults: React.FC<Props> = ({
                         >
                           <ExternalLink size={14} />
                           {t('visitLink') ?? 'زيارة الرابط'}
-                        </a>
-                      )}
-                      {r.imageUrl && !r.productUrl && (
-                        <a
-                          href={r.imageUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 text-xs px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-white transition"
-                        >
-                          <ExternalLink size={14} />
-                          {t('openImage') ?? 'فتح الصورة'}
                         </a>
                       )}
                     </div>
