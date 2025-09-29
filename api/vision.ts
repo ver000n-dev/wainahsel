@@ -1,9 +1,7 @@
 // /api/vision.ts (Vercel Edge)
-// يستقبل صورة Base64 ويستدعي Google Vision API ثم يرجع نتيجة منظّمة
+// يستقبل صورة Base64 ويستدعي Google Vision ثم يرجّع { ok, webDetection, ocrText, processingTime }
 
-export const config = {
-  runtime: "edge", // ✅ تشغيل على Vercel Edge
-};
+export const config = { runtime: "edge" };
 
 type Json = Record<string, unknown>;
 
@@ -20,7 +18,7 @@ function stripDataUrl(b64: string): string {
   return trimmed.startsWith("data:") ? trimmed.split(",").pop() || "" : trimmed;
 }
 
-// تقدير حجم البايتات من طول الـBase64 دون فك الترميز
+// تقدير حجم الـBase64 بدون فك الترميز
 function base64Bytes(b64: string): number {
   const s = b64.replace(/\s/g, "");
   const padding = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
@@ -58,23 +56,22 @@ export default async function handler(req: Request): Promise<Response> {
     }
 
     const content = stripDataUrl(raw);
-    if (!content) {
-      return json({ ok: false, error: "EMPTY_IMAGE" }, 400);
-    }
+    if (!content) return json({ ok: false, error: "EMPTY_IMAGE" }, 400);
 
     // حد الحجم ~3MB
     const sizeMB = base64Bytes(content) / (1024 * 1024);
-    if (sizeMB > 3.1) {
-      return json({ ok: false, error: "IMAGE_TOO_LARGE: max 3MB" }, 413);
-    }
+    if (sizeMB > 3.1) return json({ ok: false, error: "IMAGE_TOO_LARGE: max 3MB" }, 413);
 
     const payload = {
       requests: [
         {
           image: { content },
           features: [
-            { type: "WEB_DETECTION", maxResults: 10 },
+            { type: "WEB_DETECTION",  maxResults: 10 },
             { type: "TEXT_DETECTION", maxResults: 10 },
+            // يمكن إبقاؤهما لتحسين التسمية، أو حذفهما لتقليل الاستهلاك:
+            { type: "LABEL_DETECTION", maxResults: 10 },
+            { type: "LOGO_DETECTION",  maxResults: 5  },
           ],
           imageContext: {
             languageHints: ["ar", "en"],
@@ -95,19 +92,13 @@ export default async function handler(req: Request): Promise<Response> {
 
     const rawText = await gRes.text();
     if (!gRes.ok) {
-      // رجّع رسالة مفيدة بدون إغراق
-      return json(
-        {
-          ok: false,
-          error: `VISION_FAIL ${gRes.status}: ${rawText.slice(0, 300)}`,
-        },
-        502
-      );
+      return json({ ok: false, error: `VISION_FAIL ${gRes.status}: ${rawText.slice(0, 300)}` }, 502);
     }
 
     const data = JSON.parse(rawText) as any;
-    const web = data?.responses?.[0]?.webDetection ?? {};
-    const ocr = data?.responses?.[0]?.textAnnotations?.[0]?.description ?? "";
+    const resp0 = data?.responses?.[0] ?? {};
+    const web = resp0?.webDetection ?? {};
+    const ocr = resp0?.textAnnotations?.[0]?.description ?? "";
 
     return json({
       ok: true,
