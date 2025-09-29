@@ -1,5 +1,8 @@
 // src/services/aiSearch.ts
+// — يجمع بين Google Vision (WEB_DETECTION) و Google CSE لإرجاع منتجات مرتبة
+// — يشترط روابط منتجات أولاً (الموثوقة ثم غير الموثوقة)، ويستخدم الصور كملاذ أخير
 
+// ======================= Types =======================
 export interface SearchResult {
   id: string;
   name: string;
@@ -25,7 +28,7 @@ export interface SearchResult {
   // الموقع (اختياري)
   countryCode?: string;   // "KW" | "SA" | "AE" | ...
 
-  // داخلي للفرز
+  // داخلي
   _rankScore?: number;
 }
 
@@ -36,6 +39,7 @@ export interface AISearchResponse {
   userCountry?: string;
 }
 
+// ======================= Utils =======================
 function hostnameOf(url: string | undefined): string | undefined {
   if (!url) return undefined;
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return undefined; }
@@ -55,9 +59,7 @@ function uniq<T>(arr: T[], keyFn: (x: T) => string): T[] {
   return out;
 }
 
-// ----------------- إضافات الموثوقية/الأسعار/الموقع -----------------
-
-// متاجر موثوقة (زِد عليها ما تشاء)
+// ================== متاجر + بلد + سعر ==================
 const TRUSTED_DOMAINS = [
   'amazon.sa','amazon.ae','amazon.com',
   'noon.com',
@@ -72,7 +74,6 @@ function isTrustedStore(domain?: string) {
   return TRUSTED_DOMAINS.some(t => domain.endsWith(t));
 }
 
-// ربط دومين → بلد (تقريبي)
 const DOMAIN_TO_COUNTRY: Record<string,string> = {
   'amazon.sa':'SA',
   'amazon.ae':'AE',
@@ -98,8 +99,8 @@ function parsePrice(raw?: string): { currency?: string; value?: number } {
     'USD':'USD','$':'USD'
   };
   // يدعم "12.50 KWD" أو "KWD 12.50" أو "ر.س 99"
-  const m = raw.match(/([\d.,]+)\s*(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)/i)
-        || raw.match(/(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)\s*([\d.,]+)/i);
+  const m = raw?.match(/([\d.,]+)\s*(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)/i)
+        || raw?.match(/(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)\s*([\d.,]+)/i);
   if (!m) return {};
   const num = parseFloat((m[1]||m[2]).replace(/,/g,''));
   const curKey = (m[2]||m[1]||'').toUpperCase();
@@ -198,8 +199,7 @@ export function rankAndFilter(
   return allowCrossBorder ? cleaned : cleaned.filter(r => r.countryCode === userCountry);
 }
 
-// ===================================================================
-
+// ======================= Service =======================
 export class AIVisualSearchService {
   private static instance: AIVisualSearchService;
   static getInstance() {
@@ -208,7 +208,6 @@ export class AIVisualSearchService {
   }
 
   // -------- Helpers --------
-
   private fileToDataURL(file: File) {
     return new Promise<string>((resolve, reject) => {
       const r = new FileReader();
@@ -302,13 +301,11 @@ export class AIVisualSearchService {
     return croppedDataUrl;
   }
 
-  // -------- Main --------
-
+  // ======================= Main =======================
   /**
-   * يرسل القصاصة (إن وُجدت) إلى /api/vision الذي يطلب WEB_DETECTION
-   * ثم يُطبِّق ترتيبًا بمرحلتين:
-   *  1) روابط منتجات من متاجر موثوقة أولًا
-   *  2) توسعة ذكية، ثم كخيار أخير صور فقط إذا النتائج قليلة جدًا
+   * يرسل القصاصة (إن وُجدت) إلى /api/vision (WEB_DETECTION)
+   * + يدمج نتائج Google CSE بالنصّ المستنتج (bestGuess)
+   * ثم يرتب النتائج وفق السياسة المطلوبة.
    */
   async analyzeImage(
     imageFile: File,
@@ -356,7 +353,7 @@ export class AIVisualSearchService {
         .map((p: any) => ({ url: p?.url, title: p?.pageTitle }))
         .filter((p: any) => !!p.url);
 
-    // نبني Products (صور مطابقة/مشابهة + صفحات)
+    // 4) نبني Products من Vision (صور + صفحات)
     let imgProducts: SearchResult[] = [
       ...fullImgs.map((url, idx) => ({
         id: `img-full-${idx + 1}`,
@@ -375,7 +372,7 @@ export class AIVisualSearchService {
         imageUrl: url,
         productUrl: undefined,
         store: hostnameOf(url),
-        storeDomain: undefined,   // ❗ لا نملأ من imageUrl
+        storeDomain: undefined,
         confidence: 85,
         similarity: 0.85,
         description: 'Partial matching image',
@@ -386,7 +383,7 @@ export class AIVisualSearchService {
         imageUrl: url,
         productUrl: undefined,
         store: hostnameOf(url),
-        storeDomain: undefined,   // ❗ لا نملأ من imageUrl
+        storeDomain: undefined,
         confidence: 70,
         similarity: 0.70,
         description: 'Visually similar image',
@@ -400,17 +397,41 @@ export class AIVisualSearchService {
       store: hostnameOf(p.url),
       storeDomain: hostnameOf(p.url),
       description: 'Page with matching images',
-      // لاحقًا ممكن استخراج السعر من schema.org/Offer
     }));
 
-    const combinedRaw: SearchResult[] = [...imgProducts, ...pageProducts];
+    // 5) ——— دمج Google CSE ———
+    // نستورد Lazy لتقليل حجم الباندل
+    let cseProducts: SearchResult[] = [];
+    try {
+      const { searchShopsViaCSE } = await import('./cse');
+      const cse = await searchShopsViaCSE(bestGuess, opts?.userCountry ?? 'KW', 12, true);
+      cseProducts = (cse || []).map((it, idx) => ({
+        id: `cse-${idx + 1}`,
+        name: it.name || bestGuess,
+        description: 'Shop result',
+        productUrl: it.productUrl,
+        store: it.store,
+        storeDomain: it.storeDomain,
+        imageUrl: it.imageUrl,
+        price: it.price,
+        currency: it.currency,
+        priceValue: it.priceValue,
+        countryCode: it.countryCode,
+        similarity: it.similarity ?? 0.9,
+      }));
+    } catch (e) {
+      console.warn('[CSE] fallback skipped', e);
+    }
 
-    // تنظيف + إزالة التكرار
+    // إجمالي خام قبل التنظيف
+    const combinedRaw: SearchResult[] = [...cseProducts, ...pageProducts, ...imgProducts];
+
+    // 6) تنظيف + إزالة التكرار
     const normalized = combinedRaw.map(normalizeResult);
     const deduped = uniq(normalized, (x) => String(x.imageUrl || x.productUrl || x.name));
 
-    // ===== ترتيب بمرحلتين مع fallback =====
-    // 1) منتجات بروابط من متاجر موثوقة
+    // 7) ترتيب متعدد المراحل مع fallback
+    // أ) منتجات بروابط من متاجر موثوقة أولاً
     let primary = rankAndFilter(deduped, {
       userCountry: opts?.userCountry ?? 'KW',
       minSimilarity: opts?.minSimilarity ?? 0.60,
@@ -419,7 +440,7 @@ export class AIVisualSearchService {
       requireLink: true,
     });
 
-    // 2) لو قليلة، نوسع (نقبل غير الموثوق لكن مع رابط)
+    // ب) لو قليلة، نوسع (نقبل غير الموثوق لكن مع رابط)
     if (primary.length < 6) {
       const secondary = rankAndFilter(deduped, {
         userCountry: opts?.userCountry ?? 'KW',
@@ -432,7 +453,7 @@ export class AIVisualSearchService {
       secondary.forEach(s => { if (!seen.has(s.id)) primary.push(s); });
     }
 
-    // 3) لو ما زالت قليلة جدًا، آخر حل: صور فقط (بدون رابط) كمرجع بصري
+    // ج) لو قليلة جداً، نضيف صورًا فقط كمرجع بصري
     if (primary.length < 3) {
       const imgs = rankAndFilter(deduped, {
         userCountry: opts?.userCountry ?? 'KW',
