@@ -1,8 +1,7 @@
 // src/services/aiSearch.ts
-// — يجمع بين Google Vision (WEB_DETECTION) و Google CSE لإرجاع منتجات مرتبة
-// — يشترط روابط منتجات أولاً (الموثوقة ثم غير الموثوقة)، ويستخدم الصور كملاذ أخير
+// — يدمج Google Vision (WEB_DETECTION + OCR) مع Google CSE (إن وُجد)
+// — يعتمد /api/vision بصيغته الجديدة: { ok, webDetection, ocrText, processingTime }
 
-// ======================= Types =======================
 export interface SearchResult {
   id: string;
   name: string;
@@ -35,8 +34,9 @@ export interface SearchResult {
 export interface AISearchResponse {
   products: SearchResult[];
   searchQuery: string;
-  processingTime: number;
+  processingTime: number;   // بالثواني (واجهة فقط)
   userCountry?: string;
+  error?: string;
 }
 
 // ======================= Utils =======================
@@ -51,8 +51,9 @@ function uniq<T>(arr: T[], keyFn: (x: T) => string): T[] {
   for (const it of arr) {
     const k = keyFn(it);
     if (!k) continue;
-    if (!seen.has(k)) {
-      seen.add(k);
+    const kk = k.toLowerCase();
+    if (!seen.has(kk)) {
+      seen.add(kk);
       out.push(it);
     }
   }
@@ -98,7 +99,7 @@ function parsePrice(raw?: string): { currency?: string; value?: number } {
     'AED':'AED','د.إ':'AED',
     'USD':'USD','$':'USD'
   };
-  // يدعم "12.50 KWD" أو "KWD 12.50" أو "ر.س 99"
+  // "12.50 KWD" أو "KWD 12.50" أو "ر.س 99"
   const m = raw?.match(/([\d.,]+)\s*(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)/i)
         || raw?.match(/(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)\s*([\d.,]+)/i);
   if (!m) return {};
@@ -108,9 +109,9 @@ function parsePrice(raw?: string): { currency?: string; value?: number } {
   return { currency: cur, value: isNaN(num) ? undefined : num };
 }
 
-// ——— normalizeResult (إصدار يمنع اعتبار imageUrl متجرًا)
+// ——— normalizeResult (يمنع اعتبار imageUrl متجرًا)
 function normalizeResult(r: SearchResult): SearchResult {
-  // ❌ لا نستنتج المتجر من imageUrl — فقط من productUrl
+  // نستنتج المتجر فقط من productUrl
   if (!r.storeDomain && r.productUrl) {
     const d = hostnameOf(r.productUrl);
     if (d) {
@@ -119,7 +120,7 @@ function normalizeResult(r: SearchResult): SearchResult {
     }
   }
 
-  // تحويل confidence% → similarity 0..1
+  // confidence% → similarity 0..1
   if (r.similarity == null && r.confidence != null && !isNaN(r.confidence)) {
     r.similarity = Math.max(0, Math.min(1, r.confidence / 100));
   }
@@ -131,7 +132,7 @@ function normalizeResult(r: SearchResult): SearchResult {
     if (value != null) r.priceValue = value;
   }
 
-  // البلد التقريبي من الدومين (إن وُجد)
+  // البلد التقريبي من الدومين
   if (!r.countryCode && r.storeDomain) r.countryCode = inferCountryFromDomain(r.storeDomain);
 
   return r;
@@ -217,7 +218,7 @@ export class AIVisualSearchService {
     });
   }
 
-  // تحويل HEIC/HEIF إلى JPEG (إن وُجد) ثم إرجاع DataURL
+  // تحويل HEIC/HEIF → JPEG (إن وُجد) ثم إرجاع DataURL
   private async toJpegDataURL(file: File): Promise<string> {
     const isHeic =
       /heic|heif/i.test(file.type) ||
@@ -257,53 +258,57 @@ export class AIVisualSearchService {
 
   // يقصّ أهم كائن حسب /api/localize ويعيد DataURL للصورة المقصوصة
   private async cropToPrimaryObject(originalDataUrl: string): Promise<string | null> {
-    const locRes = await fetch('/api/localize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-      body: JSON.stringify({ imageBase64: originalDataUrl }),
-      cache: 'no-store',
-    });
-    const loc = await locRes.json();
-    if (!locRes.ok || !loc?.primary?.vertices) return null;
+    try {
+      const locRes = await fetch('/api/localize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+        body: JSON.stringify({ imageBase64: originalDataUrl }),
+        cache: 'no-store',
+      });
+      const loc = await locRes.json();
+      if (!locRes.ok || !loc?.primary?.vertices) return null;
 
-    const img = await this.loadImage(originalDataUrl);
-    const v: Array<{ x: number; y: number }> = loc.primary.vertices;
+      const img = await this.loadImage(originalDataUrl);
+      const v: Array<{ x: number; y: number }> = loc.primary.vertices;
 
-    // احسب المستطيل (بنسب 0..1) مع هامش صغير
-    let minX = Math.min(...v.map((p) => p.x));
-    let maxX = Math.max(...v.map((p) => p.x));
-    let minY = Math.min(...v.map((p) => p.y));
-    let maxY = Math.max(...v.map((p) => p.y));
+      // احسب المستطيل (بنسب 0..1) مع هامش صغير
+      let minX = Math.min(...v.map((p) => p.x));
+      let maxX = Math.max(...v.map((p) => p.x));
+      let minY = Math.min(...v.map((p) => p.y));
+      let maxY = Math.max(...v.map((p) => p.y));
 
-    const pad = 0.08; // 8% هامش
-    minX = Math.max(0, minX - pad);
-    minY = Math.max(0, minY - pad);
-    maxX = Math.min(1, maxX + pad);
-    maxY = Math.min(1, maxY + pad);
+      const pad = 0.08; // 8% هامش
+      minX = Math.max(0, minX - pad);
+      minY = Math.max(0, minY - pad);
+      maxX = Math.min(1, maxX + pad);
+      maxY = Math.min(1, maxY + pad);
 
-    const sx = Math.round(minX * img.naturalWidth);
-    const sy = Math.round(minY * img.naturalHeight);
-    const sw = Math.round((maxX - minX) * img.naturalWidth);
-    const sh = Math.round((maxY - minY) * img.naturalHeight);
+      const sx = Math.round(minX * img.naturalWidth);
+      const sy = Math.round(minY * img.naturalHeight);
+      const sw = Math.round((maxX - minX) * img.naturalWidth);
+      const sh = Math.round((maxY - minY) * img.naturalHeight);
 
-    if (sw <= 0 || sh <= 0) return null;
+      if (sw <= 0 || sh <= 0) return null;
 
-    const canvas = document.createElement('canvas');
-    canvas.width = sw;
-    canvas.height = sh;
-    const ctx = canvas.getContext('2d')!;
-    ctx.imageSmoothingEnabled = true;
-    // @ts-ignore
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+      const canvas = document.createElement('canvas');
+      canvas.width = sw;
+      canvas.height = sh;
+      const ctx = canvas.getContext('2d')!;
+      ctx.imageSmoothingEnabled = true;
+      // @ts-ignore
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
 
-    const croppedDataUrl = canvas.toDataURL('image/jpeg', 0.92);
-    return croppedDataUrl;
+      const croppedDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+      return croppedDataUrl;
+    } catch {
+      return null;
+    }
   }
 
   // ======================= Main =======================
   /**
-   * يرسل القصاصة (إن وُجدت) إلى /api/vision (WEB_DETECTION)
+   * يرسل القصاصة (إن وُجدت) إلى /api/vision (يرجع {ok, webDetection, ocrText})
    * + يدمج نتائج Google CSE بالنصّ المستنتج (bestGuess)
    * ثم يرتب النتائج وفق السياسة المطلوبة.
    */
@@ -318,12 +323,10 @@ export class AIVisualSearchService {
 
     // 2) قصّ الكائن الأساسي إن أمكن
     let toSend = originalDataUrl;
-    try {
-      const cropped = await this.cropToPrimaryObject(originalDataUrl);
-      if (cropped) toSend = cropped;
-    } catch { /* ignore */ }
+    const cropped = await this.cropToPrimaryObject(originalDataUrl).catch(() => null);
+    if (cropped) toSend = cropped;
 
-    // 3) اطلب WEB_DETECTION
+    // 3) اطلب WEB_DETECTION من /api/vision (الصيغة الجديدة)
     const resp = await fetch(`/api/vision?ts=${Date.now()}`, {
       method: 'POST',
       headers: {
@@ -334,17 +337,24 @@ export class AIVisualSearchService {
       cache: 'no-store',
     });
 
-    const data = await resp.json();
-    if (!resp.ok) {
-      const msg = data?.message || data?.error || 'Vision API request failed';
+    const payload = await resp.json();
+    if (!resp.ok || !payload?.ok) {
+      const msg = payload?.message || payload?.error || 'Vision API request failed';
       throw new Error(msg);
     }
 
-    const resp0 = data?.responses?.[0] || {};
-    const web = resp0?.webDetection || {};
-    const bestGuess: string = web?.bestGuessLabels?.[0]?.label?.trim?.() || 'image';
+    const web = payload.webDetection || {};
+    const ocrText: string = payload.ocrText || '';
 
-    const fullImgs: string[] = (web?.fullMatchingImages || []).map((i: any) => i?.url).filter(Boolean);
+    // استنتاج bestGuess من webDetection أو من أول webEntity
+    const bestGuess: string =
+      web?.bestGuessLabels?.[0]?.label?.trim?.() ||
+      (web?.webEntities?.[0]?.description || '').trim() ||
+      (ocrText || '').split('\n')[0]?.trim() ||
+      'image';
+
+    // مصفوفات الرؤى
+    const fullImgs: string[]   = (web?.fullMatchingImages || []).map((i: any) => i?.url).filter(Boolean);
     const partialImgs: string[] = (web?.partialMatchingImages || []).map((i: any) => i?.url).filter(Boolean);
     const similarImgs: string[] = (web?.visuallySimilarImages || []).map((i: any) => i?.url).filter(Boolean);
 
@@ -354,7 +364,7 @@ export class AIVisualSearchService {
         .filter((p: any) => !!p.url);
 
     // 4) نبني Products من Vision (صور + صفحات)
-    let imgProducts: SearchResult[] = [
+    const imgProducts: SearchResult[] = [
       ...fullImgs.map((url, idx) => ({
         id: `img-full-${idx + 1}`,
         name: bestGuess,
@@ -390,20 +400,20 @@ export class AIVisualSearchService {
       })),
     ];
 
-    let pageProducts: SearchResult[] = pages.map((p, idx) => ({
+    const pageProducts: SearchResult[] = pages.map((p, idx) => ({
       id: `page-${idx + 1}`,
       name: p.title?.trim() || bestGuess,
       productUrl: p.url,
       store: hostnameOf(p.url),
       storeDomain: hostnameOf(p.url),
       description: 'Page with matching images',
+      similarity: 0.9,
     }));
 
-    // 5) ——— دمج Google CSE ———
-    // نستورد Lazy لتقليل حجم الباندل
+    // 5) ——— دمج Google CSE (اختياري حسب المفاتيح) ———
     let cseProducts: SearchResult[] = [];
     try {
-      const { searchShopsViaCSE } = await import('./cse');
+      const { searchShopsViaCSE } = await import('./cse'); // نفس ملفك السابق
       const cse = await searchShopsViaCSE(bestGuess, opts?.userCountry ?? 'KW', 12, true);
       cseProducts = (cse || []).map((it, idx) => ({
         id: `cse-${idx + 1}`,
@@ -420,7 +430,7 @@ export class AIVisualSearchService {
         similarity: it.similarity ?? 0.9,
       }));
     } catch (e) {
-      console.warn('[CSE] fallback skipped', e);
+      console.warn('[CSE] skipped or unavailable:', e);
     }
 
     // إجمالي خام قبل التنظيف
@@ -428,7 +438,7 @@ export class AIVisualSearchService {
 
     // 6) تنظيف + إزالة التكرار
     const normalized = combinedRaw.map(normalizeResult);
-    const deduped = uniq(normalized, (x) => String(x.imageUrl || x.productUrl || x.name));
+    const deduped = uniq(normalized, (x) => String(x.productUrl || x.imageUrl || x.name || ''));
 
     // 7) ترتيب متعدد المراحل مع fallback
     // أ) منتجات بروابط من متاجر موثوقة أولاً
@@ -440,7 +450,7 @@ export class AIVisualSearchService {
       requireLink: true,
     });
 
-    // ب) لو قليلة، نوسع (نقبل غير الموثوق لكن مع رابط)
+    // ب) لو قليلة، نوسع (نقبل غير الموثوقة لكن مع رابط)
     if (primary.length < 6) {
       const secondary = rankAndFilter(deduped, {
         userCountry: opts?.userCountry ?? 'KW',
@@ -470,14 +480,14 @@ export class AIVisualSearchService {
 
     return {
       products: ranked,
-      searchQuery: bestGuess + (toSend !== originalDataUrl ? ' · cropped' : ''),
-      processingTime: Math.round((performance.now() - t0)) / 1000,
+      searchQuery: (bestGuess || '').trim() + (toSend !== originalDataUrl ? ' · cropped' : ''),
+      processingTime: Math.round((performance.now() - t0) / 1000 * 1000) / 1000, // ثوانٍ بثلاث منازل
       userCountry: opts?.userCountry ?? 'KW',
     };
   }
 
   // بحث نصي (مستقبلاً)
   async searchByText(query: string): Promise<AISearchResponse> {
-    return { products: [], searchQuery: query, processingTime: 0.2 };
+    return { products: [], searchQuery: query, processingTime: 0.2, userCountry: 'KW' };
   }
 }
