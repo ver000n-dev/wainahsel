@@ -1,6 +1,6 @@
 // src/services/cse.ts
-// بحث Google Programmable Search (CSE) لتهيئة النتائج لكرت المنتج
-// يفضّل /api/cse لحماية المفاتيح، مع fallback مفاتيح واجهة إن لزم.
+// بحث Google Programmable Search (CSE) مع تهيئة النتائج لتناسب كرت المنتج
+// يفضّل النداء السيرفري (/api/cse)، مع fallback لمفاتيح الواجهة عند غيابه.
 
 const TRUSTED_DOMAINS = [
   'amazon.sa','amazon.ae','amazon.com',
@@ -19,15 +19,10 @@ const DOMAIN_TO_COUNTRY: Record<string,string> = {
   'luluhypermarket.com':'AE',
 };
 
-function hostnameOf(url?: string) {
-  if (!url) return '';
-  try { return new URL(url).hostname.replace(/^www\./,''); } catch { return ''; }
-}
-function inferCountryFromDomain(d?: string) {
-  if (!d) return undefined;
-  const key = Object.keys(DOMAIN_TO_COUNTRY).find(k => d.endsWith(k));
-  return key ? DOMAIN_TO_COUNTRY[key] : undefined;
-}
+function siteFilter() { return TRUSTED_DOMAINS.map(d => `site:${d}`).join(' OR '); }
+function hostnameOf(url?: string) { if (!url) return ''; try { return new URL(url).hostname.replace(/^www\./,''); } catch { return ''; } }
+function inferCountryFromDomain(d?: string) { if (!d) return undefined; const k = Object.keys(DOMAIN_TO_COUNTRY).find(x => d.endsWith(x)); return k ? DOMAIN_TO_COUNTRY[k] : undefined; }
+
 function parsePrice(raw?: string): { currency?: string; value?: number } {
   if (!raw) return {};
   const MAP: Record<string,string> = {
@@ -37,8 +32,8 @@ function parsePrice(raw?: string): { currency?: string; value?: number } {
     'USD':'USD','$':'USD'
   };
   const m =
-    raw?.match(/([\d.,]+)\s*(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)/i) ||
-    raw?.match(/(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)\s*([\d.,]+)/i);
+    raw.match(/([\d.,]+)\s*(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)/i) ||
+    raw.match(/(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)\s*([\d.,]+)/i);
   if (!m) return {};
   const num = parseFloat((m[1]||m[2]).replace(/,/g,''));
   const curKey = (m[2]||m[1]||'').toUpperCase();
@@ -47,19 +42,42 @@ function parsePrice(raw?: string): { currency?: string; value?: number } {
 }
 
 function dedup<T>(arr: T[], keyFn: (x: T) => string): T[] {
-  const seen = new Set<string>();
-  const out: T[] = [];
-  for (const it of arr) {
-    const k = keyFn(it)?.toLowerCase?.() || '';
-    if (!k || seen.has(k)) continue;
-    seen.add(k);
-    out.push(it);
-  }
+  const seen = new Set<string>(); const out: T[] = [];
+  for (const it of arr) { const k = keyFn(it)?.toLowerCase?.() || ''; if (!k || seen.has(k)) continue; seen.add(k); out.push(it); }
   return out;
 }
 
 const API_KEY = import.meta.env.VITE_CSE_API_KEY as string | undefined;
 const CX      = import.meta.env.VITE_CSE_CX as string | undefined;
+
+export interface CSEItem { link?: string; displayLink?: string; title?: string; snippet?: string; pagemap?: any; }
+export interface CSEProduct {
+  id: string; name: string; productUrl: string; store: string; storeDomain: string;
+  imageUrl?: string; price?: string; currency?: string; priceValue?: number; countryCode?: string; similarity: number;
+}
+
+function mapItemToProduct(it: CSEItem, baseQ: string, idx: number): CSEProduct | null {
+  const link = it.link || ''; if (!link) return null;
+  const storeDomain = hostnameOf(link);
+  const store = storeDomain || (it.displayLink || '').replace(/^www\./,'');
+  const title = (it.title || baseQ).trim();
+  const imageUrl = it.pagemap?.cse_image?.[0]?.src || it.pagemap?.metatags?.[0]?.['og:image'] || undefined;
+  const priceRaw = [it.title, it.snippet].filter(Boolean).join(' ');
+  const { currency, value } = parsePrice(priceRaw);
+  return {
+    id: `cse-${idx}-${link}`,
+    name: title,
+    productUrl: link,
+    store,
+    storeDomain,
+    imageUrl,
+    price: currency && value != null ? `${value} ${currency}` : undefined,
+    currency,
+    priceValue: value,
+    countryCode: inferCountryFromDomain(storeDomain),
+    similarity: 0.93,
+  };
+}
 
 function shouldUseServerRoute(): boolean {
   try {
@@ -79,101 +97,36 @@ async function fetchWithTimeout(url: string, opts: RequestInit & { timeoutMs?: n
   finally { clearTimeout(id); }
 }
 
-export interface CSEItem {
-  link?: string;
-  displayLink?: string;
-  title?: string;
-  snippet?: string;
-  pagemap?: any;
-}
-export interface CSEProduct {
-  id: string;
-  name: string;
-  productUrl: string;
-  store: string;
-  storeDomain: string;
-  imageUrl?: string;
-  price?: string;
-  currency?: string;
-  priceValue?: number;
-  countryCode?: string;
-  similarity: number;
-}
-
-function mapItemToProduct(it: CSEItem, baseQ: string, idx: number): CSEProduct | null {
-  const link = it.link || '';
-  if (!link) return null;
-
-  const storeDomain = hostnameOf(link);
-  const store = storeDomain || (it.displayLink || '').replace(/^www\./,'');
-  const title = (it.title || baseQ).trim();
-  const imageUrl =
-    it.pagemap?.cse_image?.[0]?.src ||
-    it.pagemap?.metatags?.[0]?.['og:image'] ||
-    undefined;
-
-  const priceRaw = [it.title, it.snippet].filter(Boolean).join(' ');
-  const { currency, value } = parsePrice(priceRaw);
-
-  return {
-    id: `cse-${idx}-${link}`,
-    name: title,
-    productUrl: link,
-    store,
-    storeDomain,
-    imageUrl,
-    price: currency && value != null ? `${value} ${currency}` : undefined,
-    currency,
-    priceValue: value,
-    countryCode: inferCountryFromDomain(storeDomain),
-    similarity: 0.93,
-  };
-}
-
 async function searchViaServer(baseQ: string, gl: string, num: number, trustedOnly: boolean): Promise<CSEItem[]> {
-  const params = new URLSearchParams({ q: baseQ, num: String(num), gl, trustedOnly: trustedOnly ? '1' : '0' });
-  const r = await fetchWithTimeout(`/api/cse?${params.toString()}`, {
-    cache: 'no-store',
-    headers: { Accept: 'application/json' },
-    timeoutMs: 8000,
-  });
+  const params = new URLSearchParams({ q: baseQ, num: String(num), gl, trustedOnly: trustedOnly ? '1':'0' });
+  const r = await fetchWithTimeout(`/api/cse?${params.toString()}`, { cache:'no-store', headers:{Accept:'application/json'} });
   if (!r.ok) throw new Error(`/api/cse ${r.status}`);
-  const j = await r.json();
-  return j?.items || j?.products || [];
+  const j = await r.json(); return j?.items || j?.products || [];
 }
 
 async function searchViaClientKeys(baseQ: string, gl: string, num: number, trustedOnly: boolean): Promise<CSEItem[]> {
   if (!API_KEY || !CX) return [];
-  const q = trustedOnly ? `${baseQ} ${TRUSTED_DOMAINS.map(d=>`site:${d}`).join(' OR ')}` : baseQ;
+  const q = trustedOnly ? `${baseQ} ${siteFilter()}` : baseQ;
   const results: CSEItem[] = [];
-
-  for (let start = 1; results.length < num; start += 10) {
-    const pageSize = Math.min(10, num - results.length);
+  for (let start = 1; start <= num; start += 10) {
+    const pageSize = Math.min(10, num - (start - 1));
     const params = new URLSearchParams({
-      key: API_KEY!, cx: CX!, q, num: String(pageSize), start: String(start),
-      gl, lr: 'lang_ar|lang_en', safe:'off'
+      key: API_KEY, cx: CX, q, num: String(pageSize), start: String(start),
+      gl, lr: 'lang_ar|lang_en', safe: 'off'
     });
     const url = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
-    const r = await fetchWithTimeout(url, { headers: { Accept:'application/json' }, cache:'no-store', timeoutMs:8000 });
+    const r = await fetchWithTimeout(url, { headers:{Accept:'application/json'}, cache:'no-store' });
     if (!r.ok) break;
-    const j = await r.json();
-    const items = j?.items || [];
-    if (!items.length) break;
+    const j = await r.json(); const items: CSEItem[] = j?.items || []; if (items.length === 0) break;
     results.push(...items);
   }
   return results;
 }
 
-/** البحث عبر CSE مع أفضل مسار متاح */
-export async function searchShopsViaCSE(
-  query: string,
-  countryCode: string = 'KW',
-  num: number = 10,
-  trustedOnly: boolean = true
-): Promise<CSEProduct[]> {
+export async function searchShopsViaCSE(query: string, countryCode = 'KW', num = 10, trustedOnly = true): Promise<CSEProduct[]> {
   try {
     if (!query?.trim()) return [];
-    const baseQ = `"${query.trim()}"`;
+    const baseQ = `"${query.trim()}"`; // اقتباس لتحسين الدقة
     const gl = GL[countryCode] || 'sa';
 
     let items: CSEItem[] = [];
@@ -187,7 +140,7 @@ export async function searchShopsViaCSE(
     if (!items || items.length === 0) return [];
 
     const mapped = items.map((it, idx) => mapItemToProduct(it, query, idx)).filter(Boolean) as CSEProduct[];
-    const deduped = dedup(mapped, x => x.productUrl || x.name);
+    const deduped = dedup(mapped, (x) => x.productUrl || x.name);
 
     deduped.sort((a, b) => {
       const at = TRUSTED_DOMAINS.some(d => a.storeDomain.endsWith(d)) ? 1 : 0;
