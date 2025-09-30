@@ -1,5 +1,5 @@
 // /api/vision.ts (Vercel Edge)
-// يستقبل صورة Base64 ويستدعي Google Vision ثم يرجّع { ok, webDetection, ocrText, processingTime }
+// يستقبل صورة Base64 ويستدعي Google Vision API ثم يرجع نتيجة منظّمة
 
 export const config = { runtime: "edge" };
 
@@ -18,7 +18,7 @@ function stripDataUrl(b64: string): string {
   return trimmed.startsWith("data:") ? trimmed.split(",").pop() || "" : trimmed;
 }
 
-// تقدير حجم الـBase64 بدون فك الترميز
+// تقدير حجم البايتات من طول الـBase64 دون فك الترميز
 function base64Bytes(b64: string): number {
   const s = b64.replace(/\s/g, "");
   const padding = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
@@ -29,14 +29,10 @@ export default async function handler(req: Request): Promise<Response> {
   const t0 = Date.now();
 
   try {
-    if (req.method !== "POST") {
-      return json({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
-    }
+    if (req.method !== "POST") return json({ ok: false, error: "METHOD_NOT_ALLOWED" }, 405);
 
     const apiKey = process.env.VISION_API_KEY;
-    if (!apiKey) {
-      return json({ ok: false, error: "VISION_API_KEY missing in production" }, 500);
-    }
+    if (!apiKey) return json({ ok: false, error: "VISION_API_KEY missing in production" }, 500);
 
     const ct = (req.headers.get("content-type") || "").toLowerCase();
     if (!ct.includes("application/json")) {
@@ -44,16 +40,10 @@ export default async function handler(req: Request): Promise<Response> {
     }
 
     let body: any;
-    try {
-      body = await req.json();
-    } catch {
-      return json({ ok: false, error: "INVALID_JSON" }, 400);
-    }
+    try { body = await req.json(); } catch { return json({ ok: false, error: "INVALID_JSON" }, 400); }
 
     const raw = body?.imageBase64;
-    if (!raw || typeof raw !== "string") {
-      return json({ ok: false, error: "NO_IMAGE: send { imageBase64 }" }, 400);
-    }
+    if (!raw || typeof raw !== "string") return json({ ok: false, error: "NO_IMAGE: send { imageBase64 }" }, 400);
 
     const content = stripDataUrl(raw);
     if (!content) return json({ ok: false, error: "EMPTY_IMAGE" }, 400);
@@ -69,9 +59,9 @@ export default async function handler(req: Request): Promise<Response> {
           features: [
             { type: "WEB_DETECTION",  maxResults: 10 },
             { type: "TEXT_DETECTION", maxResults: 10 },
-            // يمكن إبقاؤهما لتحسين التسمية، أو حذفهما لتقليل الاستهلاك:
-            { type: "LABEL_DETECTION", maxResults: 10 },
-            { type: "LOGO_DETECTION",  maxResults: 5  },
+            // يمكن تفعيلهم لتحسين الدقة (يزيد الاستهلاك):
+            // { type: "LABEL_DETECTION", maxResults: 10 },
+            // { type: "LOGO_DETECTION",  maxResults: 5 },
           ],
           imageContext: {
             languageHints: ["ar", "en"],
@@ -81,14 +71,11 @@ export default async function handler(req: Request): Promise<Response> {
       ],
     };
 
-    const gRes = await fetch(
-      "https://vision.googleapis.com/v1/images:annotate?key=" + apiKey,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify(payload),
-      }
-    );
+    const gRes = await fetch("https://vision.googleapis.com/v1/images:annotate?key=" + apiKey, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(payload),
+    });
 
     const rawText = await gRes.text();
     if (!gRes.ok) {
@@ -96,9 +83,8 @@ export default async function handler(req: Request): Promise<Response> {
     }
 
     const data = JSON.parse(rawText) as any;
-    const resp0 = data?.responses?.[0] ?? {};
-    const web = resp0?.webDetection ?? {};
-    const ocr = resp0?.textAnnotations?.[0]?.description ?? "";
+    const web = data?.responses?.[0]?.webDetection ?? {};
+    const ocr = data?.responses?.[0]?.textAnnotations?.[0]?.description ?? "";
 
     return json({
       ok: true,
@@ -107,7 +93,6 @@ export default async function handler(req: Request): Promise<Response> {
       ocrText: ocr,
     });
   } catch (e: any) {
-    const msg = (e?.message || "UNKNOWN_ERROR").slice(0, 400);
-    return json({ ok: false, error: msg }, 500);
+    return json({ ok: false, error: String(e?.message || "UNKNOWN_ERROR").slice(0, 400) }, 500);
   }
 }
