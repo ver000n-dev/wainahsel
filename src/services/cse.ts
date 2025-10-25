@@ -64,7 +64,7 @@ export function rankAndFilter(
   items: SearchResult[],
   opts?: { userCountry?: string; minSimilarity?: number; onlyTrusted?: boolean; allowCrossBorder?: boolean; requireLink?: boolean }
 ) {
-  const { userCountry = 'KW', minSimilarity = 0.60, onlyTrusted = false, allowCrossBorder = true, requireLink = true } = opts || {};
+const { userCountry = 'KW', minSimilarity = 0.30, onlyTrusted = false, allowCrossBorder = true, requireLink = false } = opts || {}
   const cleaned = items.map(normalizeResult).filter(r => {
     if (requireLink && !r.productUrl) return false;
     if (r.similarity == null || r.similarity < minSimilarity) return false;
@@ -72,7 +72,7 @@ export function rankAndFilter(
     return true;
   });
 
-  cleaned.sort((a,b) => {
+cleaned.sort((a, b) => {  const sim = (b.similarity ?? 0) - (a.similarity ?? 0);  if (Math.abs(sim) > 1e-6) return sim;  const ap = a.priceValue ?? Number.POSITIVE_INFINITY;  const bp = b.priceValue ?? Number.POSITIVE_INFINITY;  if (ap !== bp) return ap - bp;  const aLoc = a.countryCode === userCountry ? 1 : 0;  const bLoc = b.countryCode === userCountry ? 1 : 0;  if (aLoc !== bLoc) return bLoc - aLoc;  return (a.storeDomain ?? '').localeCompare(b.storeDomain ?? '');});
     const aLink = a.productUrl ? 1 : 0, bLink = b.productUrl ? 1 : 0; if (aLink !== bLink) return bLink - aLink;
     const aTrust = isTrustedStore(a.storeDomain) ? 1 : 0, bTrust = isTrustedStore(b.storeDomain) ? 1 : 0; if (aTrust !== bTrust) return bTrust - aTrust;
     const a90 = (a.similarity ?? 0) >= 0.90 ? 1 : 0, b90 = (b.similarity ?? 0) >= 0.90 ? 1 : 0; if (a90 !== b90) return b90 - a90;
@@ -169,7 +169,7 @@ export class AIVisualSearchService {
     let cseProducts: SearchResult[] = [];
     try {
       const { searchShopsViaCSE } = await import('./cse');
-      let cse = await searchShopsViaCSE(bestGuess, userCountry, 12, true);
+let cse = await searchShopsViaCSE(bestGuess, userCountry, 12, false);
       if (!cse || cse.length === 0) cse = await searchShopsViaCSE(bestGuess, userCountry, 12, false);
       cseProducts = (cse || []).map((it, idx) => ({
         id:`cse-${idx+1}`, name: it.name || bestGuess, description:'Shop result',
