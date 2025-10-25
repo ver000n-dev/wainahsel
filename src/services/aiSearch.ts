@@ -91,7 +91,7 @@ cleaned.sort((a, b) => {
   });
 
   return allowCrossBorder ? cleaned : cleaned.filter(r => r.countryCode === userCountry);
-}
+
 
 // ===== Service =====
 export class AIVisualSearchService {
