@@ -1,70 +1,230 @@
-// /api/cse.ts (Vercel Serverless)
-// يبحث عبر Google Custom Search JSON API مع فلترة مواقع موثوقة اختيارياً
+// src/services/aiSearch.ts
+// يدمج Google Vision (WEB_DETECTION + OCR) مع Google CSE (إن وُجد)
+// يعتمد /api/vision: { ok, webDetection, ocrText, processingTime }
 
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-
-const TRUSTED_DOMAINS = [
-  'amazon.sa','amazon.ae','amazon.com',
-  'noon.com','xcite.com','x-cite.com',
-  'jarir.com','extra.com',
-  'carrefourksa.com','carrefouruae.com',
-  'luluhypermarket.com','ikea.com','shein.com','namshi.com'
-];
-
-function siteFilter() {
-  return TRUSTED_DOMAINS.map(d => `site:${d}`).join(' OR ');
+export interface SearchResult {
+  id: string;
+  name: string;
+  description?: string;
+  price?: string; currency?: string; priceValue?: number;
+  store?: string; storeDomain?: string;
+  imageUrl?: string; productUrl?: string;
+  confidence?: number; similarity?: number;
+  countryCode?: string;
+  _rankScore?: number;
 }
 
-function clamp(n: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, n)); }
+export interface AISearchResponse {
+  products: SearchResult[];
+  searchQuery: string;
+  processingTime: number;   // ثواني
+  userCountry?: string;
+  error?: string;
+}
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  try {
-    if (req.method !== 'GET') {
-      return res.status(405).json({ ok:false, error:'METHOD_NOT_ALLOWED' });
+// ===== Utils =====
+function hostnameOf(url: string | undefined): string | undefined {
+  if (!url) return undefined; try { return new URL(url).hostname.replace(/^www\./,''); } catch { return undefined; }
+}
+function uniq<T>(arr: T[], keyFn: (x: T) => string): T[] {
+  const seen = new Set<string>(); const out: T[] = [];
+  for (const it of arr) { const k = keyFn(it); if (!k) continue; const kk = k.toLowerCase(); if (!seen.has(kk)) { seen.add(kk); out.push(it); } }
+  return out;
+}
+
+const TRUSTED_DOMAINS = [
+  'amazon.sa','amazon.ae','amazon.com','noon.com',
+  'xcite.com','x-cite.com','jarir.com','extra.com',
+  'carrefourksa.com','carrefouruae.com','luluhypermarket.com','ikea.com','shein.com','namshi.com'
+];
+function isTrustedStore(domain?: string) { return !!domain && TRUSTED_DOMAINS.some(t => domain.endsWith(t)); }
+const DOMAIN_TO_COUNTRY: Record<string,string> = {
+  'amazon.sa':'SA','amazon.ae':'AE','xcite.com':'KW','x-cite.com':'KW',
+  'jarir.com':'SA','extra.com':'SA','carrefourksa.com':'SA','carrefouruae.com':'AE','luluhypermarket.com':'AE',
+};
+function inferCountryFromDomain(d?: string) { if (!d) return undefined; const k = Object.keys(DOMAIN_TO_COUNTRY).find(x => d.endsWith(x)); return k ? DOMAIN_TO_COUNTRY[k] : undefined; }
+
+function parsePrice(raw?: string): { currency?: string; value?: number } {
+  if (!raw) return {};
+  const MAP: Record<string,string> = {'KWD':'KWD','د.ك':'KWD','KD':'KWD','SAR':'SAR','ر.س':'SAR','ريال':'SAR','AED':'AED','د.إ':'AED','USD':'USD','$':'USD'};
+  const m = raw?.match(/([\d.,]+)\s*(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)/i) || raw?.match(/(KWD|د\.ك|KD|SAR|ر\.س|ريال|AED|د\.إ|USD|\$)\s*([\d.,]+)/i);
+  if (!m) return {}; const num = parseFloat((m[1]||m[2]).replace(/,/g,'')); const curKey = (m[2]||m[1]||'').toUpperCase(); const cur = MAP[curKey];
+  return { currency: cur, value: isNaN(num) ? undefined : num };
+}
+
+function normalizeResult(r: SearchResult): SearchResult {
+  if (!r.storeDomain && r.productUrl) { const d = hostnameOf(r.productUrl); if (d) { r.storeDomain = d; if (!r.store) r.store = d; } }
+  if (r.similarity == null && r.confidence != null && !isNaN(r.confidence)) r.similarity = Math.max(0, Math.min(1, r.confidence / 100));
+  if (r.price && (r.priceValue == null || !r.currency)) { const {currency, value} = parsePrice(r.price); if (currency) r.currency = currency; if (value != null) r.priceValue = value; }
+  if (!r.countryCode && r.storeDomain) r.countryCode = inferCountryFromDomain(r.storeDomain);
+  return r;
+}
+
+export function rankAndFilter(
+  items: SearchResult[],
+  opts?: { userCountry?: string; minSimilarity?: number; onlyTrusted?: boolean; allowCrossBorder?: boolean; requireLink?: boolean }
+) {
+  const { userCountry = 'KW', minSimilarity = 0.60, onlyTrusted = false, allowCrossBorder = true, requireLink = true } = opts || {};
+  const cleaned = items.map(normalizeResult).filter(r => {
+    if (requireLink && !r.productUrl) return false;
+    if (r.similarity == null || r.similarity < minSimilarity) return false;
+    if (onlyTrusted && (!r.storeDomain || !isTrustedStore(r.storeDomain))) return false;
+    return true;
+  });
+
+  cleaned.sort((a,b) => {
+    const aLink = a.productUrl ? 1 : 0, bLink = b.productUrl ? 1 : 0; if (aLink !== bLink) return bLink - aLink;
+    const aTrust = isTrustedStore(a.storeDomain) ? 1 : 0, bTrust = isTrustedStore(b.storeDomain) ? 1 : 0; if (aTrust !== bTrust) return bTrust - aTrust;
+    const a90 = (a.similarity ?? 0) >= 0.90 ? 1 : 0, b90 = (b.similarity ?? 0) >= 0.90 ? 1 : 0; if (a90 !== b90) return b90 - a90;
+    const sim = (b.similarity ?? 0) - (a.similarity ?? 0); if (Math.abs(sim) > 1e-6) return sim;
+    const aLoc = a.countryCode === userCountry ? 1 : 0, bLoc = b.countryCode === userCountry ? 1 : 0; if (aLoc !== bLoc) return bLoc - aLoc;
+    const ap = a.priceValue ?? Number.POSITIVE_INFINITY, bp = b.priceValue ?? Number.POSITIVE_INFINITY; if (ap !== bp) return ap - bp;
+    return (a.storeDomain||'').localeCompare(b.storeDomain||'');
+  });
+
+  return allowCrossBorder ? cleaned : cleaned.filter(r => r.countryCode === userCountry);
+}
+
+// ===== Service =====
+export class AIVisualSearchService {
+  private static instance: AIVisualSearchService;
+  static getInstance() { if (!AIVisualSearchService.instance) AIVisualSearchService.instance = new AIVisualSearchService(); return AIVisualSearchService.instance; }
+
+  private fileToDataURL(file: File) { return new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result || '')); r.onerror = reject; r.readAsDataURL(file); }); }
+  private async toJpegDataURL(file: File): Promise<string> {
+    const isHeic = /heic|heif/i.test(file.type) || /\.hei[c|f]$/i.test(file.name);
+    if (!isHeic) return await this.fileToDataURL(file);
+    try {
+      const { default: heic2any } = await import('heic2any');
+      const jpegBlob = (await heic2any({ blob: file, toType:'image/jpeg', quality:0.92 })) as Blob;
+      return await new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result || '')); r.onerror = reject; r.readAsDataURL(jpegBlob); });
+    } catch { return await this.fileToDataURL(file); }
+  }
+  private loadImage(dataUrl: string) { return new Promise<HTMLImageElement>((resolve, reject) => { const img = new Image(); img.onload = () => resolve(img); img.onerror = reject; img.src = dataUrl; }); }
+
+  private async cropToPrimaryObject(originalDataUrl: string): Promise<string | null> {
+    try {
+      const locRes = await fetch('/api/localize', { method:'POST', headers:{'Content-Type':'application/json','Cache-Control':'no-store'}, body: JSON.stringify({ imageBase64: originalDataUrl }), cache:'no-store' });
+      const loc = await locRes.json(); if (!locRes.ok || !loc?.primary?.vertices) return null;
+      const img = await this.loadImage(originalDataUrl); const v: Array<{x:number;y:number}> = loc.primary.vertices;
+      let minX = Math.min(...v.map(p=>p.x)), maxX = Math.max(...v.map(p=>p.x)), minY = Math.min(...v.map(p=>p.y)), maxY = Math.max(...v.map(p=>p.y));
+      const pad = 0.08; minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad); maxX = Math.min(1, maxX + pad); maxY = Math.min(1, maxY + pad);
+      const sx = Math.round(minX * img.naturalWidth),  sy = Math.round(minY * img.naturalHeight);
+      const sw = Math.round((maxX - minX) * img.naturalWidth), sh = Math.round((maxY - minY) * img.naturalHeight); if (sw <= 0 || sh <= 0) return null;
+      const canvas = document.createElement('canvas'); canvas.width = sw; canvas.height = sh;
+      const ctx = canvas.getContext('2d')!; ctx.imageSmoothingEnabled = true; // @ts-ignore
+      ctx.imageSmoothingQuality = 'high'; ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+      return canvas.toDataURL('image/jpeg', 0.92);
+    } catch { return null; }
+  }
+
+  async analyzeImage(
+    imageFile: File,
+    opts?: { userCountry?: string; minSimilarity?: number; onlyTrusted?: boolean; allowCrossBorder?: boolean }
+  ): Promise<AISearchResponse> {
+    const t0 = performance.now();
+    const userCountry = opts?.userCountry ?? 'KW';
+
+    // 1) اقرأ الصورة (+ HEIC)
+    const originalDataUrl = await this.toJpegDataURL(imageFile);
+
+    // 2) قصّ إن أمكن
+    let toSend = originalDataUrl;
+    const cropped = await this.cropToPrimaryObject(originalDataUrl).catch(() => null);
+    if (cropped) toSend = cropped;
+
+    // 3) /api/vision
+    const resp = await fetch(`/api/vision?ts=${Date.now()}`, {
+      method:'POST', headers:{'Content-Type':'application/json','Cache-Control':'no-store'},
+      body: JSON.stringify({ imageBase64: toSend }), cache:'no-store'
+    });
+    const payload = await resp.json();
+    if (!resp.ok || !payload?.ok) throw new Error(payload?.message || payload?.error || 'Vision API request failed');
+
+    const web = payload.webDetection || {};
+    const ocrText: string = payload.ocrText || '';
+    const bestGuess: string =
+      web?.bestGuessLabels?.[0]?.label?.trim?.() ||
+      (web?.webEntities?.[0]?.description || '').trim() ||
+      (ocrText || '').split('\n')[0]?.trim() ||
+      'image';
+
+    const fullImgs: string[]    = (web?.fullMatchingImages || []).map((i: any) => i?.url).filter(Boolean);
+    const partialImgs: string[] = (web?.partialMatchingImages || []).map((i: any) => i?.url).filter(Boolean);
+    const similarImgs: string[] = (web?.visuallySimilarImages || []).map((i: any) => i?.url).filter(Boolean);
+    const pages: Array<{ url: string; title?: string }> =
+      (web?.pagesWithMatchingImages || []).map((p: any) => ({ url: p?.url, title: p?.pageTitle })).filter((p: any) => !!p.url);
+
+    const imgProducts: SearchResult[] = [
+      ...fullImgs.map((url, i) => ({ id:`img-full-${i+1}`, name:bestGuess, imageUrl:url, productUrl:undefined, store:hostnameOf(url), storeDomain:undefined, confidence:95, similarity:0.95, description:'Full matching image' })),
+      ...partialImgs.map((url, i) => ({ id:`img-partial-${i+1}`, name:bestGuess, imageUrl:url, productUrl:undefined, store:hostnameOf(url), storeDomain:undefined, confidence:85, similarity:0.85, description:'Partial matching image' })),
+      ...similarImgs.map((url, i) => ({ id:`img-similar-${i+1}`, name:bestGuess, imageUrl:url, productUrl:undefined, store:hostnameOf(url), storeDomain:undefined, confidence:70, similarity:0.70, description:'Visually similar image' })),
+    ];
+
+    const pageProducts: SearchResult[] = pages.map((p, i) => ({
+      id:`page-${i+1}`, name: p.title?.trim() || bestGuess, productUrl: p.url, store: hostnameOf(p.url), storeDomain: hostnameOf(p.url), description:'Page with matching images', similarity:0.9
+    }));
+
+    // 5) CSE (اختياري) — جرّب trustedOnly ثم وسّع
+    let cseProducts: SearchResult[] = [];
+    try {
+      const { searchShopsViaCSE } = await import('./cse');
+      let cse = await searchShopsViaCSE(bestGuess, userCountry, 12, true);
+      if (!cse || cse.length === 0) cse = await searchShopsViaCSE(bestGuess, userCountry, 12, false);
+      cseProducts = (cse || []).map((it, idx) => ({
+        id:`cse-${idx+1}`, name: it.name || bestGuess, description:'Shop result',
+        productUrl: it.productUrl, store: it.store, storeDomain: it.storeDomain, imageUrl: it.imageUrl,
+        price: it.price, currency: it.currency, priceValue: it.priceValue, countryCode: it.countryCode, similarity: it.similarity ?? 0.9
+      }));
+    } catch (e) { console.warn('[CSE] skipped/unavailable', e); }
+
+    // إجمالي خام + تنظيف + dedupe
+    const combinedRaw: SearchResult[] = [...cseProducts, ...pageProducts, ...imgProducts];
+    const normalized = combinedRaw.map(normalizeResult);
+    const deduped = uniq(normalized, (x) => String(x.productUrl || x.imageUrl || x.name || ''));
+
+    // 7) ترتيب مرن + fallbacks
+    let primary = rankAndFilter(deduped, { userCountry, minSimilarity: 0.50, onlyTrusted: false, allowCrossBorder: true, requireLink: true });
+
+    if (primary.length < 6) {
+      const secondary = rankAndFilter(deduped, { userCountry, minSimilarity: 0.45, onlyTrusted: false, allowCrossBorder: true, requireLink: true });
+      const seen = new Set(primary.map(p => p.id)); secondary.forEach(s => { if (!seen.has(s.id)) primary.push(s); });
     }
 
-    const key = process.env.CSE_API_KEY;
-    const cx  = process.env.CSE_CX;
-    if (!key || !cx) {
-      return res.status(500).json({ ok:false, error:'CSE keys missing on server' });
+    if (primary.length < 3) {
+      const imgs = rankAndFilter(deduped, { userCountry, minSimilarity: 0.40, onlyTrusted: false, allowCrossBorder: true, requireLink: false })
+        .filter(p => !p.productUrl);
+      const seen = new Set(primary.map(p => p.id)); imgs.forEach(s => { if (!seen.has(s.id)) primary.push(s); });
     }
 
-    const qRaw = String(req.query.q || '').trim();
-    if (!qRaw) return res.status(400).json({ ok:false, error:'q is required' });
-
-    const num = clamp(parseInt(String(req.query.num || '10'), 10) || 10, 1, 30);
-    const gl  = String(req.query.gl || 'sa').toLowerCase();
-    const trustedOnly = String(req.query.trustedOnly || '1') === '1';
-
-    const baseQ = qRaw;
-    const q = trustedOnly ? `${baseQ} ${siteFilter()}` : baseQ;
-
-    const items: any[] = [];
-    // CSE يرجّع حتى 10 بالصفحة → نجزئ حتى نصل num
-    for (let start = 1; start <= num; start += 10) {
-      const pageSize = Math.min(10, num - (start - 1));
-      const params = new URLSearchParams({
-        key, cx, q,
-        num: String(pageSize),
-        start: String(start),
-        gl,
-        lr: 'lang_ar|lang_en',
-        safe: 'off',
-        fields: 'items(link,displayLink,title,snippet,pagemap)'
-      });
-
-      const url = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
-      const r = await fetch(url, { headers: { 'Accept':'application/json' }, cache: 'no-store' as RequestCache });
-      if (!r.ok) break;
-      const j = await r.json();
-      const page: any[] = j?.items || [];
-      if (page.length === 0) break;
-      items.push(...page);
+    if (primary.length === 0) {
+      const GOOGLE_DOMAINS = [
+        'site:amazon.sa','site:amazon.ae','site:noon.com','site:xcite.com','site:x-cite.com',
+        'site:jarir.com','site:extra.com','site:carrefourksa.com','site:carrefouruae.com',
+        'site:luluhypermarket.com','site:ikea.com','site:shein.com','site:namshi.com'
+      ].join(' OR ');
+      const qBase = (bestGuess && bestGuess !== 'image' ? bestGuess : (ocrText || 'منتج')).trim();
+      const gq1 = `${qBase} (${GOOGLE_DOMAINS})`;
+      const gq2 = `${qBase} سعر`;
+      const gq3 = `${qBase} buy`;
+      primary = [
+        { id:'g-1', name:`بحث Google: ${qBase}`, productUrl:`https://www.google.com/search?q=${encodeURIComponent(qBase)}`, store:'google', storeDomain:'google.com', similarity:0.5 },
+        { id:'g-2', name:'بحث في مواقع المتاجر', productUrl:`https://www.google.com/search?q=${encodeURIComponent(gq1)}`, store:'google', storeDomain:'google.com', similarity:0.5 },
+        { id:'g-3', name:'بحث مع كلمة "سعر"', productUrl:`https://www.google.com/search?q=${encodeURIComponent(gq2)}`, store:'google', storeDomain:'google.com', similarity:0.5 },
+        { id:'g-4', name:'بحث مع buy', productUrl:`https://www.google.com/search?q=${encodeURIComponent(gq3)}`, store:'google', storeDomain:'google.com', similarity:0.5 }
+      ];
     }
 
-    res.setHeader('Cache-Control', 'no-store');
-    return res.status(200).json({ ok:true, items });
-  } catch (e: any) {
-    return res.status(500).json({ ok:false, error: String(e?.message || 'CSE_ERROR') });
+    const ranked = primary.slice(0, 30);
+    return {
+      products: ranked,
+      searchQuery: (bestGuess || '').trim() + (toSend !== originalDataUrl ? ' · cropped' : ''),
+      processingTime: Math.round((performance.now() - t0) / 1000 * 1000) / 1000,
+      userCountry
+    };
+  }
+
+  async searchByText(query: string): Promise<AISearchResponse> {
+    return { products: [], searchQuery: query, processingTime: 0.2, userCountry: 'KW' };
   }
 }
