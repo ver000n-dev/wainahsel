@@ -3,6 +3,7 @@ import React from 'react';
 import { X, Tag, ExternalLink } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { SearchResult } from '../services/aiSearch';
+import { buildAffiliateUrl } from './SearchSection';
 
 interface Props {
   results: SearchResult[];
@@ -54,6 +55,9 @@ const SearchResults: React.FC<Props> = ({
     if (e.target === e.currentTarget) onClose();
   };
 
+  const aff = (url?: string | null) =>
+    url ? buildAffiliateUrl(url) : undefined;
+
   return (
     <div
       className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm"
@@ -100,84 +104,98 @@ const SearchResults: React.FC<Props> = ({
               </div>
             ) : (
               <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {results.map((r) => (
-                  <div
-                    key={r.id}
-                    className="bg-white/5 border border-white/10 rounded-2xl overflow-hidden flex flex-col"
-                  >
-                    {/* الصورة */}
-                    {r.imageUrl ? (
-                      <a
-                        href={r.productUrl || r.imageUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        title={r.name}
-                      >
-                        <img
-                          src={r.imageUrl}
-                          alt={r.name}
-                          className="w-full h-40 object-cover"
-                          loading="lazy"
-                        />
-                      </a>
-                    ) : (
-                      <div className="w-full h-40 bg-slate-800 flex items-center justify-center text-white/50 text-sm">
-                        {t('noImage') ?? 'لا توجد صورة'}
+                {results.map((r) => {
+                  const cardHref = aff(r.productUrl || r.imageUrl);
+                  const buttonHref = aff(r.productUrl ?? undefined);
+
+                  return (
+                    <div
+                      key={r.id}
+                      className="bg-white/5 border border-white/10 rounded-2xl overflow-hidden flex flex-col"
+                    >
+                      {/* الصورة */}
+                      {r.imageUrl ? (
+                        cardHref ? (
+                          <a
+                            href={cardHref}
+                            target="_blank"
+                            rel="nofollow sponsored noopener noreferrer"
+                            title={r.name}
+                          >
+                            <img
+                              src={r.imageUrl}
+                              alt={r.name}
+                              className="w-full h-40 object-cover"
+                              loading="lazy"
+                            />
+                          </a>
+                        ) : (
+                          <img
+                            src={r.imageUrl}
+                            alt={r.name}
+                            className="w-full h-40 object-cover"
+                            loading="lazy"
+                          />
+                        )
+                      ) : (
+                        <div className="w-full h-40 bg-slate-800 flex items-center justify-center text-white/50 text-sm">
+                          {t('noImage') ?? 'لا توجد صورة'}
+                        </div>
+                      )}
+
+                      {/* التفاصيل */}
+                      <div className="p-4 space-y-2 grow">
+                        <div className="flex items-center gap-2 text-white font-medium">
+                          <Tag size={16} />
+                          <span className="line-clamp-2">{r.name}</span>
+                        </div>
+
+                        {/* اسم الموقع */}
+                        {r.storeDomain && (
+                          <div className="text-xs text-white/70">
+                            🏪 {t('store') ?? 'المتجر'}: {r.storeDomain}
+                          </div>
+                        )}
+
+                        {/* نسبة التشابه */}
+                        {typeof r.similarity === 'number' && (
+                          <div className="text-xs text-emerald-400">
+                            🎯 {(t('similarity') ?? 'نسبة التطابق')}: {fmtPercent(r.similarity)}
+                          </div>
+                        )}
+
+                        {/* السعر */}
+                        {(r.price || r.priceValue) && (
+                          <div className="text-sm text-white/90">
+                            💰 {(t('price') ?? 'السعر')}: {fmtPrice(r.price, r.priceValue, r.currency)}
+                          </div>
+                        )}
+
+                        {/* الدولة */}
+                        {r.countryCode && (
+                          <div className="text-xs text-white/60">
+                            🌍 {(t('country') ?? 'الدولة')}: {r.countryCode}
+                          </div>
+                        )}
                       </div>
-                    )}
 
-                    {/* التفاصيل */}
-                    <div className="p-4 space-y-2 grow">
-                      <div className="flex items-center gap-2 text-white font-medium">
-                        <Tag size={16} />
-                        <span className="line-clamp-2">{r.name}</span>
+                      {/* الزر */}
+                      <div className="p-4 pt-0 flex items-center gap-2">
+                        {buttonHref && (
+                          <a
+                            href={buttonHref}
+                            target="_blank"
+                            rel="nofollow sponsored noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition"
+                          >
+                            <ExternalLink size={14} />
+                            {t('visitLink') ?? 'زيارة الرابط'}
+                          </a>
+                        )}
                       </div>
-
-                      {/* اسم الموقع */}
-                      {r.storeDomain && (
-                        <div className="text-xs text-white/70">
-                          🏪 {t('store') ?? 'المتجر'}: {r.storeDomain}
-                        </div>
-                      )}
-
-                      {/* نسبة التشابه */}
-                      {typeof r.similarity === 'number' && (
-                        <div className="text-xs text-emerald-400">
-                          🎯 {(t('similarity') ?? 'نسبة التطابق')}: {fmtPercent(r.similarity)}
-                        </div>
-                      )}
-
-                      {/* السعر */}
-                      {(r.price || r.priceValue) && (
-                        <div className="text-sm text-white/90">
-                          💰 {(t('price') ?? 'السعر')}: {fmtPrice(r.price, r.priceValue, r.currency)}
-                        </div>
-                      )}
-
-                      {/* الدولة */}
-                      {r.countryCode && (
-                        <div className="text-xs text-white/60">
-                          🌍 {(t('country') ?? 'الدولة')}: {r.countryCode}
-                        </div>
-                      )}
                     </div>
-
-                    {/* الزر */}
-                    <div className="p-4 pt-0 flex items-center gap-2">
-                      {r.productUrl && (
-                        <a
-                          href={r.productUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 text-xs px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition"
-                        >
-                          <ExternalLink size={14} />
-                          {t('visitLink') ?? 'زيارة الرابط'}
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
 
