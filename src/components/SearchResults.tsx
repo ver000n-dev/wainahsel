@@ -3,7 +3,21 @@ import React from 'react';
 import { X, Tag, ExternalLink } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import type { SearchResult } from '../services/aiSearch';
-import { buildAffiliateUrl } from './SearchSection';
+
+// ✅ دالة محلية صغيرة للأفلييت (تمنع الاستيراد الدائري)
+function makeAffiliateUrl(original?: string | null) {
+  if (!original) return undefined;
+  try {
+    const url = new URL(original);
+    url.searchParams.set('utm_source', 'wainahsel');
+    url.searchParams.set('utm_medium', 'visual_search');
+    url.searchParams.set('utm_campaign', 'affiliate');
+    url.searchParams.set('aff_id', 'wainahsel-1'); // غيّرها لاحقًا إذا صار عندك ID
+    return url.toString();
+  } catch {
+    return original || undefined;
+  }
+}
 
 interface Props {
   results: SearchResult[];
@@ -17,11 +31,7 @@ const fmtPercent = (v?: number) =>
   typeof v === 'number' ? `${Math.round(v * 100)}%` : '—';
 
 const fmtPrice = (price?: string, val?: number, cur?: string) =>
-  price
-    ? price
-    : val != null && cur
-    ? `${val.toFixed(2)} ${cur}`
-    : '—';
+  price ? price : val != null && cur ? `${val.toFixed(2)} ${cur}` : '—';
 
 const SearchResults: React.FC<Props> = ({
   results,
@@ -54,9 +64,6 @@ const SearchResults: React.FC<Props> = ({
   const handleBackdropClick: React.MouseEventHandler<HTMLDivElement> = (e) => {
     if (e.target === e.currentTarget) onClose();
   };
-
-  const aff = (url?: string | null) =>
-    url ? buildAffiliateUrl(url) : undefined;
 
   return (
     <div
@@ -105,8 +112,8 @@ const SearchResults: React.FC<Props> = ({
             ) : (
               <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {results.map((r) => {
-                  const cardHref = aff(r.productUrl || r.imageUrl);
-                  const buttonHref = aff(r.productUrl ?? undefined);
+                  const cardHref = makeAffiliateUrl(r.productUrl || r.imageUrl);
+                  const buttonHref = makeAffiliateUrl(r.productUrl ?? undefined);
 
                   return (
                     <div
