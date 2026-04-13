@@ -133,7 +133,7 @@ const SearchSection: React.FC<SearchSectionProps> = ({ onSearchStart, onSearchCo
               إذا ودك نبحث لك عن المنتج، أرسل لنا صورة ونرد عليك بأسرع وقت إن شاء الله
             </p>
             <a
-              href="https://wa.me/96560089181"
+              href="https://wa.me/966506702971"
               target="_blank"
               rel="noopener noreferrer"
               style={{
